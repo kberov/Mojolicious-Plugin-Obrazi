@@ -6,29 +6,74 @@ use Mojo::Collection 'c';
 use Text::CSV_XS qw( csv );
 use Imager;
 
+sub _U {'UTF-8'}
 has description => 'Generate a gallery from a directory structure with images';
 has usage       => sub { shift->extract_usage };
 my $headers = [qw(category path title description author image thumbnail)];
+has from_dir => sub { path('./')->to_abs };
+has to_dir   => sub { $_[0]->app->home->child('public') };
+
+# images to be resized
+has matrix => sub { c($headers) };
+
+# '1000x1000'
+sub max {
+  if ($_[1]) {
+    ($_[0]->{max}{width}, $_[0]->{max}{height}) = $_[1] =~ /(\d+)x(\d+)/;
+    return $_[0];
+  }
+  return $_[0]->{max} //= {width => 1000, height => 1000};
+}
+
+# '100x100'
+sub thumbs {
+  if ($_[1]) {
+    ($_[0]->{thumbs}{width}, $_[0]->{thumbs}{height}) = $_[1] =~ /(\d+)x(\d+)/;
+    return $_[0];
+  }
+  return $_[0]->{thumbs} //= {width => 100, height => 100};
+}
 
 sub run ($self, @args) {
-
   getopt \@args,
-    'f|from=s'   => \(my $from_dir = './'),
-    't|to=s'     => \(my $to_dir   = './'),
-    'x|max=s'    => \(my $max      = '1000x1000'),
-    's|thumbs=s' => \(my $thumbs   = '100x100'),
+    'f|from=s'   => \(my $from_dir = $self->from_dir),
+    't|to=s'     => \(my $to_dir   = $self->to_dir),
+    'x|max=s'    => \(my $max      = $self->max),
+    's|thumbs=s' => \(my $thumbs   = $self->thumbs),
     ;
-  my $matrix = [$headers];
+  $self->from_dir(path($from_dir)->to_abs)->to_dir(path($to_dir)->to_abs)->max($max)->thumbs($thumbs);
+  $self->_do_csv();
+  $self->_resize();
+  $self->_copy_to();
+  return;
+}
+
+# Reads the `from_dir` and dumps a csv file named after the from_dir folder.
+# The file contains a table with paths and default titles and descriptions for
+# the pictures.  This file can be given to the painter to add titles and
+# descriptions for the pictures using an application like LibreOffice Calc or
+# M$ Excel.
+sub _do_csv ($self, $root = $self->from_dir) {
+  my $csv_filepath = decode _U, $root->child($root->to_array->[-1] . '.csv');
+  if (-f $csv_filepath) {
+    $self->app->log->debug(
+      "$csv_filepath already exists.$/\tIf you want to refresh it, please remove it.$/\tContinuing with resizing and copying files...$/"
+    );
+    return $self;
+  }
+  my $matrix = $self->matrix;
   my $category;
-  my $root = path($from_dir);
   $root->list_tree({dir => 1})->sort->each(sub {
     if (-d $_) {
-      $category = decode('utf-8', $_->to_array->[-1]);
-      push @$matrix, [
-        $category, decode('utf-8', $_->to_string =~ s|$root||r), 'Заглавие на категорията с до две-три думи',
-        'Описание с две до пет изречения на категорията - къде какво, кога, защо, за кого и т.н', 'Марио Беров', '', '',
-
-      ];
+      $category = decode(_U, $_->to_array->[-1]);
+      push @$matrix,
+        [
+        $category,
+        decode(_U, $_->to_string =~ s|$root||r),
+        'Заглавие на категорията с до две-три думи',
+        'Описание с две до пет изречения на категорията - къде какво, кога, защо, за кого и т.н',
+        'Марио Беров', '', '',
+        ];
     }
     else {
       return if $_ !~ /(?:jpe?g|png|gif)$/i;
@@ -41,11 +86,11 @@ sub run ($self, @args) {
         # return;
       }
       my $size  = {width => ($img ? $img->getwidth() : 'XXXX'), height => ($img ? $img->getheight() : 'XXXX')};
-      my $image = decode('utf-8', $_->to_array->[-1]);
+      my $image = decode(_U, $_->to_array->[-1]);
       push @$matrix,
         [
         $category,
-        decode('utf-8', ($_->to_string =~ s|$root||r) . $warning),
+        decode(_U, ($_->to_string =~ s|$root||r) . $warning),
         'Заглавие на изображението с до две-три думи',
         'Описание с две до пет изречения на изображението.'
           . $/
@@ -56,14 +101,30 @@ sub run ($self, @args) {
         ];
     }
   });
-  $self->quiet(0);
-  csv(in => $matrix, enc => "utf-8", out => \my $data, binary => 1, sep_char => ",");
-  path($root, $root->to_array->[-1] . '.csv')->spurt($data);
+  csv(in => $matrix->to_array, enc => _U, out => \my $data, binary => 1, sep_char => ",");
+  path($csv_filepath)->spurt($data);
 
   # say dumper($matrix);
-  return;
+  return $self;
 }
 
+# Scales and resizes images to maximum width and height and generates thumbnails
+sub _resize($self) {
+  my $matrix = $self->matrix;
+  if (@$matrix == 1) {
+
+    # read the CSV file from disk to get calc
+    my $root = $self->from_dir;
+    my $csv_filepath = decode _U, $root->child($root->to_array->[-1] . '.csv');
+    $matrix = c @{csv(in => $csv_filepath, enc => _U, binary => 1, sep_char => ",")};
+    $self->matrix($matrix);
+  }
+  return $self;
+}
+
+sub _copy_to($self) {
+
+}
 1;
 
 =encoding utf8
