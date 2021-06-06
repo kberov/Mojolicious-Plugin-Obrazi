@@ -1,7 +1,7 @@
 package Mojolicious::Command::Author::generate::obrazi;
 use Mojo::Base Mojolicious::Command => -signatures;
 use Mojo::File 'path';
-use Mojo::Util qw(getopt encode decode dumper slugify);
+use Mojo::Util qw(punycode_decode punycode_encode getopt encode decode dumper);
 use Mojo::Collection 'c';
 use Text::CSV_XS qw( csv );
 use Imager;
@@ -28,6 +28,10 @@ has defaults => sub { {
     . $/
     . ' Материали, размери,какво, защо - според каквото мислиш, че е важно.',
 } };
+
+# An empty Imager instance on which the read() method will be called for every
+# image we work with.
+has imager => sub { Imager->new };
 
 # images to be resized
 has matrix => sub { c([qw(category path title description author image thumbnail)]) };
@@ -66,6 +70,47 @@ sub run ($self, @args) {
   return;
 }
 
+# Calculates the resized image dimensions according to the C<$self-E<gt>max>
+# and C<$self-E<gt>thumbs> gallery contraints. Accepts the utf8 decoded path
+# and the raw path to the file to be worked on. Returns two empty strings if
+# there is error reading the image and warns about the error. Returns filenames
+# for the resized image and the thumbnail image.
+sub calculate_max_and_thumbs ($self, $path, $raw_path) {
+  state $imager = $self->imager;
+  my $log = $self->log;
+  my $img;
+  my $image = [$raw_path->to_array->[-1] =~ /^(.+?)\.(.\w+)$/];
+  $log->info('Inspecting image ', $path);
+
+  my $max        = $self->max;
+  my $thumbs     = $self->thumbs;
+  my %size       = %$max;
+  my %thumb_size = %$thumbs;
+  if (not eval { $img = $imager->read(file => $raw_path) }) {
+    $log->warn(" !!! Skipping $path. Image error: " . $imager->errstr());
+    return ('', '');
+  }
+  else {
+    $image->[0] = decode _U, $image->[0];
+    %size       = (width => $img->getwidth, height => $img->getheight);
+    %thumb_size = %size;
+    if ($size{width} > $max->{width} || $size{height} > $max->{height}) {
+      @size{qw(x_scale y_scale width height)}
+        = $img->scale_calculate(xpixels => $max->{width}, ypixels => $max->{height}, type => 'min');
+    }
+
+    if ($thumb_size{width} > $thumbs->{width} || $thumb_size{height} > $thumbs->{height}) {
+      @thumb_size{qw(x_scale y_scale width height)}
+        = $img->scale_calculate(xpixels => $thumbs->{width}, ypixels => $thumbs->{height}, type => 'min');
+    }
+  }
+
+  return (
+    punycode_encode($image->[0]) . "_$size{width}x$size{height}.$image->[1]",
+    punycode_encode($image->[0]) . "_$thumb_size{width}x$thumb_size{height}.$image->[1]"
+  );
+}
+
 # Reads the `from_dir` and dumps a csv file named after the from_dir folder.
 # The file contains a table with paths and default titles and descriptions for
 # the pictures.  This file can be given to the painter to add titles and
@@ -98,40 +143,14 @@ sub _do_csv ($self, $root = $self->from_dir) {
     }
     elsif (-f $_) {
       return if $_ !~ /(?:jpe?g|png|gif)$/i;
-      my $img;
-      my $image = [$_->to_array->[-1] =~ /^(.+?)\.(.\w+)$/];
-      $log->info('Inspecting image ', $path);
-
-      if (not eval { $img = Imager->new(file => $_) }) {
-        $log->warn(" !!! Skipping $path. Image error: " . Imager->errstr());
-        return;
-      }
-      else {
-        $image->[0] = decode _U, $image->[0];
-        %size       = (width => $img->getwidth, height => $img->getheight);
-        %thumb_size = %size;
-        if ($size{width} > $max->{width} || $size{height} > $max->{height}) {
-          @size{qw(x_scale y_scale width height)}
-            = $img->scale_calculate(xpixels => $max->{width}, ypixels => $max->{height}, type => 'min');
-        }
-
-        if ($thumb_size{width} > $thumbs->{width} || $thumb_size{height} > $thumbs->{height}) {
-          @thumb_size{qw(x_scale y_scale width height)}
-            = $img->scale_calculate(xpixels => $thumbs->{width}, ypixels => $thumbs->{height}, type => 'min');
-        }
-      }
 
       # for images without category - which are in the $root folder
       $category = '' unless $path =~ /$category/;
       push @$matrix,
         [
-        $category,
-        $path,
-        $defaults->{image_title},
-        $defaults->{image_description},
-        $defaults->{author},
-        slugify($image->[0], 1) . "_$size{width}x$size{height}.$image->[1]",
-        slugify($image->[0], 1) . "_$thumb_size{width}x$thumb_size{height}.$image->[1]",
+        $category,                $path,
+        $defaults->{image_title}, $defaults->{image_description},
+        $defaults->{author},      $self->calculate_max_and_thumbs($path, $_)
         ];
     }
   });
@@ -158,6 +177,7 @@ sub _resize($self) {
 sub _copy_to($self) {
 
 }
+
 1;
 
 =encoding utf8
