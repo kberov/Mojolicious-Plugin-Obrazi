@@ -1,24 +1,41 @@
 package Mojolicious::Command::Author::generate::obrazi;
 use Mojo::Base Mojolicious::Command => -signatures;
 use Mojo::File 'path';
-use Mojo::Util qw(getopt encode decode dumper);
+use Mojo::Util qw(getopt encode decode dumper slugify);
 use Mojo::Collection 'c';
 use Text::CSV_XS qw( csv );
 use Imager;
 
 sub _U {'UTF-8'}
 has description => 'Generate a gallery from a directory structure with images';
-has usage       => sub { shift->extract_usage };
-my $headers = [qw(category path title description author image thumbnail)];
+
+# our own log, used instead of 'say'.
+has log => sub {
+  Mojo::Log->new(short => 1, format => sub { "[$$] [$_[1]] " . join(' ', @_[2 .. $#_]) . $/ });
+};
+
+has usage    => sub { shift->extract_usage };
 has from_dir => sub { path('./')->to_abs };
 has to_dir   => sub { $_[0]->app->home->child('public') };
 
+# Default titles and descriptions
+has defaults => sub { {
+  author               => 'Марио Беров',
+  category_title       => 'Заглавие на категорията с до две-три думи',
+  category_description => 'Описание с две до пет изречения на категорията - къде какво, кога, защо, за кого и т.н',
+  image_title          => 'Заглавие на изображението с до две-три думи',
+  image_description    => 'Описание с две до пет изречения на изображението.'
+    . $/
+    . ' Материали, размери,какво, защо - според каквото мислиш, че е важно.',
+} };
+
 # images to be resized
-has matrix => sub { c($headers) };
+has matrix => sub { c([qw(category path title description author image thumbnail)]) };
 
 # '1000x1000'
 sub max {
   if ($_[1]) {
+    $_[0]->{max} = $_[1] && return $_[0] if ref $_[1];
     ($_[0]->{max}{width}, $_[0]->{max}{height}) = $_[1] =~ /(\d+)x(\d+)/;
     return $_[0];
   }
@@ -28,6 +45,7 @@ sub max {
 # '100x100'
 sub thumbs {
   if ($_[1]) {
+    $_[0]->{thumbs} = $_[1] && return $_[0] if ref $_[1];
     ($_[0]->{thumbs}{width}, $_[0]->{thumbs}{height}) = $_[1] =~ /(\d+)x(\d+)/;
     return $_[0];
   }
@@ -55,56 +73,71 @@ sub run ($self, @args) {
 # M$ Excel.
 sub _do_csv ($self, $root = $self->from_dir) {
   my $csv_filepath = decode _U, $root->child($root->to_array->[-1] . '.csv');
+  my $log = $self->log;
   if (-f $csv_filepath) {
-    $self->app->log->debug(
+    $log->info(
       "$csv_filepath already exists.$/\tIf you want to refresh it, please remove it.$/\tContinuing with resizing and copying files...$/"
     );
     return $self;
   }
-  my $matrix = $self->matrix;
-  my $category;
+  my $category   = '';
+  my $defaults   = $self->defaults;
+  my $matrix     = $self->matrix;
+  my $max        = $self->max;
+  my $thumbs     = $self->thumbs;
+  my %size       = %$max;
+  my %thumb_size = %$thumbs;
   $root->list_tree({dir => 1})->sort->each(sub {
+    my $path = decode(_U, $_->to_string =~ s|$root/||r);
     if (-d $_) {
+      $log->info("Inspecting category $path");
       $category = decode(_U, $_->to_array->[-1]);
       push @$matrix,
-        [
-        $category,
-        decode(_U, $_->to_string =~ s|$root||r),
-        'Заглавие на категорията с до две-три думи',
-        'Описание с две до пет изречения на категорията - къде какво, кога, защо, за кого и т.н',
-        'Марио Беров', '', '',
+        [$category, $path, $defaults->{category_title}, $defaults->{category_description}, $defaults->{author}, '', '',
         ];
     }
-    else {
+    elsif (-f $_) {
       return if $_ !~ /(?:jpe?g|png|gif)$/i;
-      say $_;
       my $img;
-      my $warning = '';
-      if (not eval { $img = Imager->new(file => $_) }) {
-        $warning = ' !!! Skipping... ' . Imager->errstr();
+      my $image = [$_->to_array->[-1] =~ /^(.+?)\.(.\w+)$/];
+      $log->info('Inspecting image ', $path);
 
-        # return;
+      if (not eval { $img = Imager->new(file => $_) }) {
+        $log->warn(" !!! Skipping $path. Image error: " . Imager->errstr());
+        return;
       }
-      my $size  = {width => ($img ? $img->getwidth() : 'XXXX'), height => ($img ? $img->getheight() : 'XXXX')};
-      my $image = decode(_U, $_->to_array->[-1]);
+      else {
+        $image->[0] = decode _U, $image->[0];
+        %size       = (width => $img->getwidth, height => $img->getheight);
+        %thumb_size = %size;
+        if ($size{width} > $max->{width} || $size{height} > $max->{height}) {
+          @size{qw(x_scale y_scale width height)}
+            = $img->scale_calculate(xpixels => $max->{width}, ypixels => $max->{height}, type => 'min');
+        }
+
+        if ($thumb_size{width} > $thumbs->{width} || $thumb_size{height} > $thumbs->{height}) {
+          @thumb_size{qw(x_scale y_scale width height)}
+            = $img->scale_calculate(xpixels => $thumbs->{width}, ypixels => $thumbs->{height}, type => 'min');
+        }
+      }
+
+      # for images without category - which are in the $root folder
+      $category = '' unless $path =~ /$category/;
       push @$matrix,
         [
         $category,
-        decode(_U, ($_->to_string =~ s|$root||r) . $warning),
-        'Заглавие на изображението с до две-три думи',
-        'Описание с две до пет изречения на изображението.'
-          . $/
-          . ' Материали, размери,какво, защо - според каквото мислиш, че е важно.',
-        'Марио Беров',
-        $image =~ s/^(.+?)\.(.\w+)$/$1-$size->{width}x$size->{height}.$2/r,
-        '',
+        $path,
+        $defaults->{image_title},
+        $defaults->{image_description},
+        $defaults->{author},
+        slugify($image->[0], 1) . "_$size{width}x$size{height}.$image->[1]",
+        slugify($image->[0], 1) . "_$thumb_size{width}x$thumb_size{height}.$image->[1]",
         ];
     }
   });
   csv(in => $matrix->to_array, enc => _U, out => \my $data, binary => 1, sep_char => ",");
   path($csv_filepath)->spurt($data);
 
-  # say dumper($matrix);
   return $self;
 }
 
@@ -166,7 +199,8 @@ descriptions.
 
 The word B<обраꙁъ>(singular) means L<face, image, picture, symbol, example,
 template, etc.|https://histdict.uni-sofia.bg/dictionary/show/d_05616>
-in OCS/Old BG language.
+in OCS/Old BG language. The name of the plugin is the plural variant in
+nominative case (обраꙁи).
 
 =head1 ATTRIBUTES
 
@@ -176,14 +210,19 @@ L<Mojolicious::Command> and implements the following new ones.
 =head2 description
 
   my $description = $обраꙁи->description;
-  $makefile       = $обраꙁи->description('Foo');
+  $self       = $обраꙁи->description('Foo');
 
 Short description of this command, used for the command list.
+
+=head2 from_dir
+
+    $self = $обраꙁи->from_dir('./');
+    my $root_folder_abs_path = $обраꙁи->from_dir;
 
 =head2 usage
 
   my $usage = $обраꙁи->usage;
-  $makefile = $обраꙁи->usage('Foo');
+  $self = $обраꙁи->usage('Foo');
 
 Usage information for this command, used for the help screen.
 

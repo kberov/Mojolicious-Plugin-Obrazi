@@ -3,6 +3,7 @@ use Mojo::Base -strict;
 use Test::More;
 use Test::Mojo;
 use Mojo::File qw(curfile path tempdir);
+use Mojo::Util qw(encode decode);
 use lib curfile->dirname->dirname->child('lib')->to_string;
 my $t              = Test::Mojo->new('Mojolicious');
 my $random_tempdir = tempdir('opraziXXXX', TMPDIR => 1, CLEANUP => 1);
@@ -40,19 +41,25 @@ my $defaults = sub {
 };
 my $run = sub {
   my $from_dir = curfile->dirname->child('data/from');
-  note $from_dir . '|' . $random_tempdir;
+
+  # Remove previously generated index file.
+  unlink "$from_dir/" . $from_dir->to_array->[-1] . '.csv';
   my $buffer = '';
+
   {
     open my $handle, '>', \$buffer;
-    local *STDOUT = $handle;
+    local *STDERR = $handle;
     $command->run('-f' => $from_dir, '-t' => $random_tempdir);
   }
-  note $buffer;
-  like $buffer => qr/loga16\.png/, 'right file';
+
+  # note $buffer;
+  like $buffer                  => qr/warn.+?Skipping.+?loga4.png. Image error: iCCP/, 'right warning';
+  like $buffer                  => qr/loga16\.png/,                                    'right file';
+  like decode('UTF-8', $buffer) => qr/Inspecting category мозайки/,                    'right category';
 };
 subtest help     => $help;
 subtest defaults => $defaults;
-#TODO subtest run      => $run;
+subtest run      => $run;
 
 done_testing;
 
