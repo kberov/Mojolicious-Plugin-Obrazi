@@ -12,7 +12,7 @@ WriteMakefile(
   NAME             => __PACKAGE__,
   VERSION_FROM     => $module_file,
   AUTHOR           => 'Красимир Беров <berov@cpan.org>',
-  PREREQ_PM        => {'Mojolicious' => 9.18, 'Text::CSV_XS' => 1.46, 'Imager' => 1.012,},
+  PREREQ_PM        => {'Mojolicious' => 9.17, 'Text::CSV_XS' => 1.46, 'Imager' => 1.012,},
   test             => {TESTS         => 't/*.t'},
   MIN_PERL_VERSION => '5.026000',
   META_MERGE       => {
