@@ -48,7 +48,7 @@ my @header = qw(category path title description author image thumbnail);
 has matrix => sub { c([@header]) };
 
 # resized images
-has _processed => sub { c(@header) };
+has _processed => sub { c() };
 
 # '1000x1000'
 sub max {
@@ -72,12 +72,14 @@ sub thumbs {
 
 sub run ($self, @args) {
   getopt \@args,
-    'f|from=s'   => \(my $from_dir = $self->from_dir),
-    't|to=s'     => \(my $to_dir   = $self->to_dir),
-    'x|max=s'    => \(my $max      = $self->max),
-    's|thumbs=s' => \(my $thumbs   = $self->thumbs),
+    'f|from=s'   => \(my $from_dir     = $self->from_dir),
+    't|to=s'     => \(my $to_dir       = $self->to_dir),
+    'x|max=s'    => \(my $max          = $self->max),
+    's|thumbs=s' => \(my $thumbs       = $self->thumbs),
+    'i|index=s'  => \(my $csv_filename = $self->csv_filename),
     ;
-  $self->from_dir(path($from_dir)->to_abs)->to_dir(path($to_dir)->to_abs)->max($max)->thumbs($thumbs);
+  $self->from_dir(path($from_dir)->to_abs)->to_dir(path($to_dir)->to_abs)->max($max)->thumbs($thumbs)
+    ->csv_filename($csv_filename);
   $self->_do_csv->_resize_and_copy_to_dir->_do_html;
   return;
 }
@@ -157,7 +159,12 @@ sub _make_matrix_row ($self, $root, $raw_path, $category, $defaults, $matrix, $l
     $log->info("Inspecting category $path");
     $$category = decode(_U, $_->to_array->[-1]);
     push @$matrix,
-      [$$category, $path, $defaults->{category_title}, $defaults->{category_description}, $defaults->{author}, '', '',];
+      [
+      $$category, $path,
+      "$defaults->{category_title} – $$category",
+      $defaults->{category_description},
+      $defaults->{author}, '', '',
+      ];
   }
   elsif (-f $raw_path) {
     if ($_ !~ $FILETYPES) {
@@ -169,9 +176,10 @@ sub _make_matrix_row ($self, $root, $raw_path, $category, $defaults, $matrix, $l
     $$category = '' unless $path =~ /$$category/;
     push @$matrix,
       [
-      $$category,               $path,
-      $defaults->{image_title}, $defaults->{image_description},
-      $defaults->{author},      $self->calculate_max_and_thumbs($path, $raw_path)
+      $$category, $path,
+      "$defaults->{image_title} – " . path($path)->basename,
+      $defaults->{image_description},
+      $defaults->{author}, $self->calculate_max_and_thumbs($path, $raw_path)
       ];
   }
 }
@@ -182,7 +190,7 @@ sub _resize_and_copy_to_dir($self) {
   my $csv_filepath = decode _U, $self->from_dir->child($self->csv_filename);
   if (@$matrix == 1) {
 
-    # read the CSV file from disk to get calc
+    # read the CSV file from disk to get calculated dimensions
     $matrix = c @{csv(in => $csv_filepath, enc => _U, binary => 1, sep_char => ",")};
     $self->matrix($matrix);
   }
@@ -240,15 +248,21 @@ sub _process_chunk_of_files ($self, $files = []) {
         next;
       }
       my $sized_path = $to_path->child($row->[-2])->to_string;
-      unless ($img->scale(%sized)->write(file => $sized_path)) {
-        $log->warn("!!! Cannot write image $sized_path!\nError:" . $img->errstr);
+      my $maxi       = $img->scale(%sized);
+      $maxi->settag(name => 'i_xres', value => 96);
+      $maxi->settag(name => 'i_yres', value => 96);
+      unless ($maxi->write(file => $sized_path)) {
+        $log->warn("!!! Cannot write image $sized_path!\nError:" . $maxi->errstr);
       }
       else {
         $log->info("Written $sized_path.");
       }
       my $thumb_path = $to_path->child($row->[-1])->to_string;
-      unless ($img->scale(%thumb)->write(file => $thumb_path)) {
-        $log->warn("!!! Cannot write image $thumb_path!\nError:" . $img->errstr);
+      my $thumbi     = $img->scale(%thumb);
+      $thumbi->settag(name => 'i_xres', value => 96);
+      $thumbi->settag(name => 'i_yres', value => 96);
+      unless ($thumbi->write(file => $thumb_path)) {
+        $log->warn("!!! Cannot write image $thumb_path!\nError:" . $thumbi->errstr);
       }
       else {
         $log->info("Written $thumb_path.");
@@ -278,10 +292,29 @@ sub _process_chunk_of_files ($self, $files = []) {
 
 }
 
-sub _do_html($self){
-my $html = $self->to_dir->child('obrazi.html');
-  $self->render_to_file('obrazi.html' => $html, {matrix =>$self->matrix});
-  $self->chmod_file($html, oct(644));
+sub _do_html($self) {
+  state $app = $self->app;
+  my $categories = $self->matrix->grep(sub { !$_->[-1] && !$_->[-2] && $_->[1] =~ /$_->[0]$/ });
+  my $processed  = $self->_processed;
+  my $obrazi     = $categories->map(sub($cat) {
+    my $level = $cat->[1] =~ m|(/)|g;
+    $level += 2;
+    my $title   = $app->t('h' . $level, id => $cat->[1], $cat->[2]);
+    my $images  = $processed->map(sub($img) { $cat->[0] eq $img->[0] ? $img : (); });
+    my $section = $images->map(sub($img) {
+      my $path = path($cat->[1]);
+      $app->t(
+        'div',
+        class => "card col",
+        sub { $app->t('img', 'data-img' => $path->child($img->[-2]), src => $path->child($img->[-1])); }
+      );
+    })->join($/);
+    return $title . $app->t('section', class => 'row', sub { $/ . $section });
+  })->join($/);
+  my $html_file       = $self->to_dir->child('obrazi.html');
+  my $html = $self->render_data('obrazi.html', {obrazi => $obrazi});
+$self->write_file($html_file => encode _U, $html)
+# $self->chmod_file($html, oct(644));
 
 }
 1;
@@ -414,7 +447,7 @@ needed.
 
     # add a category
     push @$matrix, [
-        $category, $path, $defaults->{category_title},
+        $category, $path, "$defaults->{category_title} – $category",
         $defaults->{category_description}, $defaults->{author}, '', ''
     ];
 
@@ -515,16 +548,6 @@ __DATA__
     </head>
     <body>
         <h1>Обраꙁи</h1>
-        % my $category ='';
-        <% for my $row(@$matrix) { %>
-        % my $level = 2;
-        % if($row->[0] && !$row->[-1]) { # this is a category
-        % $level += $row->[1] =~ m|(/)|g;
-        <h<%= $level %>><%= $row->[2] %></h<%= $level %>>
-        <p><%= $row->[3] %></p>
-        % $category = $row->[0];
-
-        % }
-        <% } %>
+        <%= $obrazi %>
     </body>
 </html>
