@@ -296,23 +296,26 @@ sub _do_html($self) {
   state $app = $self->app;
   my $categories = $self->matrix->grep(sub { !$_->[-1] && !$_->[-2] && $_->[1] =~ /$_->[0]$/ });
   my $processed  = $self->_processed;
-  my $obrazi     = $categories->map(sub($cat) {
-    my $level = $cat->[1] =~ m|(/)|g;
-    $level += 2;
-    my $title   = $app->t('h' . $level, id => $cat->[1], $cat->[2]);
-    my $images  = $processed->map(sub($img) { $cat->[0] eq $img->[0] ? $img : (); });
-    my $section = $images->map(sub($img) {
-      my $path = path($cat->[1]);
-      $app->t(
-        'div',
-        class => "card col",
-        sub { $app->t('img', 'data-img' => $path->child($img->[-2]), src => $path->child($img->[-1])); }
-      );
-    })->join($/);
-    return $title . $app->t('section', class => 'row', sub { $/ . $section });
-  })->join($/);
+#  my $obrazi     = $categories->map(sub($cat) {
+#    my $level = $cat->[1] =~ m|(/)|g;
+#    $level += 2;
+#    my $title   = $app->t('h' . $level, id => $cat->[1], $cat->[2]);
+#    my $images  = $processed->map(sub($img) { $cat->[0] eq $img->[0] ? $img : (); });
+#    my $section = $images->map(sub($img) {
+#      my $path = path($cat->[1]);
+#      $app->t(
+#        'div',
+#        class => "card col",
+#        sub { $app->t('img', 'data-img' => $path->child($img->[-2]), src => $path->child($img->[-1])); }
+#      );
+#    })->join($/);
+#    return $title . $app->t('section', class => 'row', sub { $/ . $section });
+#  })->join($/);
+
   my $html_file       = $self->to_dir->child('obrazi.html');
-  my $html = $self->render_data('obrazi.html', {obrazi => $obrazi});
+  #my $html = $self->render_data('obrazi.html', {obrazi => $obrazi});
+  my $html = $self->render_data('obrazi.html',
+    {categories => $categories, processed => $processed, app => $app, thumbs => $self->thumbs});
 $self->write_file($html_file => encode _U, $html)
 # $self->chmod_file($html, oct(644));
 
@@ -538,16 +541,148 @@ L<Mojolicious>, L<Mojolicious::Guides>, L<https://mojolicious.org>.
 __DATA__
 
 @@ obrazi.html
+% use Mojo::Base -signatures;
+% use Mojo::File qw(path);
 <!DOCTYPE html>
 <html>
     <head>
         <meta charset="utf-8" />
         <meta http-equiv="X-UA-Compatible" content="IE=edge" />
         <title>Обраꙁи</title>
+        <script
+			src="https://code.jquery.com/jquery-3.6.0.slim.js"
+		    integrity="sha256-HwWONEZrpuoh951cQD1ov2HUK5zA5DwJ1DNUXaM6FsY="
+			crossorigin="anonymous"></script>
         <link rel="stylesheet" href="https://unpkg.com/chota@latest">
+        <style>
+            section .card {
+                background-position: center;
+                background-repeat: no-repeat;
+                max-width: <%= $thumbs->{width} + 15 %>px;
+                height: <%= $thumbs->{width} + 15 %>px;
+                overflow: hidden; /* Hide scrollbars */
+                cursor: pointer;
+                /* filter: blur(3px);
+                -webkit-filter: blur(3px); */
+            }
+            section .card .image {
+                width: 100% !important;
+                height: 100% !important;
+                background-position: center;
+                background-repeat: no-repeat;
+                background-color: rgba(11, 11, 11, 0.9);
+                color: #fff;
+                text-shadow: 2px 2px 4px #000;
+                position: fixed;
+                box-sizing: border-box;
+                left: 0;
+                top: 0;
+                display: none;
+                z-index: 1024;
+                padding: 1em;
+            }
+            section {
+                display: none;
+            }
+            h2, section.level2 {
+                margin-left:5rem;
+            }
+            h3, section.level3 {
+                margin-left:10rem;
+            }
+            h4, section.level4 {
+                margin-left:10rem;
+            }
+            h2, h3, h4 {
+                cursor: pointer;
+            }
+        </style>
     </head>
     <body>
         <h1>Обраꙁи</h1>
-        <%= $obrazi %>
+        <%#= $obrazi %>
+% my $col = 2;
+% my $idx =0;
+% my $img_idx = 0;
+% for my $cat(@$categories){
+%    my $level = $cat->[1] =~ m|(/)|g;
+%    $level += 2; $idx++;
+<h<%= $level %> data-index="<%= $idx %>"><%= $cat->[2] %></h<%= $level %>>
+%    my $images  = $processed->map(sub($img) { $cat->[0] eq $img->[0] ? $img : (); });
+<section tabindex="<%= $idx %>" class="idx<%= $idx %> level<%= $level %>">
+%    while(my @row = splice @$images, 0,int(12/$col)) {
+    <div class="row">
+    %   for my $img(@row) { $img_idx++;
+    %       my $path = path($cat->[1]);
+        <div class="col card"
+            data-index="<%= $img_idx %>"
+            title="<%= $img->[2] %>"
+            style="background-image :url('<%= $path->child($img->[-1])%>')">
+            <div class="image" id="<%= $img_idx %>"
+                style="background-image: url(<%= $path->child($img->[-2])%>)">
+                <h1><%= $img->[2] %></h1>
+                <p><%= $img->[3] %></p>
+            </div>
+        </div>
+    % }
+    </div>
+% } # end of while
+</section>
+% } # end for @$categories
+<script>
+
+// Clicking on a category title shows/hides the category's <section> element.
+$('h2,h2,h3').click(function(e) {
+    e.stopPropagation();
+    let idx = $(e.target).data('index');
+    $('section.idx' + idx).toggle('slow');
+})
+
+// open
+$('section .card').click(function(e){
+    e.stopPropagation();
+    let id = $(e.target).data('index');
+    $('#' + id).toggle('slow');
+});
+
+// close
+$('section .card .image').click(function(e) {
+    e.stopPropagation();
+    $(e.target).toggle('slow');
+});
+
+$('section').keydown(function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    // close this image and open
+    let img = $('section .card .image:visible');
+    if(img.get(0) == undefined) return;
+    let id = img.attr('id');
+    console.log("id" +id);
+    switch (e.key) {
+        case "ArrowLeft":
+            // the previous
+            id--;
+            $('#' + id).toggle('slow');
+            break;
+        case "ArrowRight":
+            // the next
+            id++;
+            $('#' + id).toggle('slow');
+            break;
+        case "ArrowUp":
+            // the previous
+            id--;
+            $('#' + id).toggle('slow');
+            break;
+        case "ArrowDown":
+            // the next
+            id++;
+            $('#' + id).toggle('slow');
+            break;
+    }
+img.toggle();
+});
+</script>
     </body>
 </html>
