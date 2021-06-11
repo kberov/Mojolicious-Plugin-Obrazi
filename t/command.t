@@ -6,7 +6,7 @@ use Mojo::File qw(curfile path tempdir);
 use Mojo::Util qw(encode decode);
 use lib curfile->dirname->dirname->child('lib')->to_string;
 my $t              = Test::Mojo->new('Mojolicious');
-my $random_tempdir = tempdir('opraziXXXX', TMPDIR => 1, CLEANUP => 0);
+my $random_tempdir = tempdir('opraziXXXX', TMPDIR => 1, CLEANUP => 1);
 
 my $COMMAND = 'Mojolicious::Command::Author::generate::obrazi';
 require_ok($COMMAND);
@@ -28,6 +28,7 @@ my $help = sub {
   like $buffer => qr/-t, --to/                             => 'SYNOPSIS --to';
   like $buffer => qr/-x, --max/                            => 'SYNOPSIS --max';
   like $buffer => qr/-s, --thumbs/                         => 'SYNOPSIS --thumbs';
+  like $buffer => qr/-i, --index/                          => 'SYNOPSIS --index';
 };
 
 my $defaults = sub {
