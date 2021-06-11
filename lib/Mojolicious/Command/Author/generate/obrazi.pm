@@ -2,7 +2,7 @@ package Mojolicious::Command::Author::generate::obrazi;
 use feature ':5.26';
 use Mojo::Base Mojolicious::Command => -signatures;
 use Mojo::File 'path';
-use Mojo::Util qw(punycode_decode punycode_encode getopt encode decode dumper);
+use Mojo::Util qw(url_escape punycode_decode punycode_encode getopt encode decode dumper);
 use Mojo::Collection 'c';
 use Text::CSV_XS qw( csv );
 use Imager;
@@ -350,9 +350,9 @@ Mojolicious::Command::Author::generate::obrazi - a gallery generator command
 
 =head1 DESCRIPTION
 
-L<Mojolicious::Command::Author::generate::obrazi generates a gallery from a
-directory structure containing images. The gallery is a static html file which
-content can be easily taken, modified, and embedded into any page.
+L<Mojolicious::Command::Author::generate::obrazi> generates a gallery from a
+directory structure, containing images. The produced gallery is a static html
+file which content can be easily taken, modified, and embedded into any page.
 
 In addition the command generates a csv file describing the images. This file
 can be edited. Titles and descriptions can be added for each image and then the
@@ -363,6 +363,22 @@ The word B<обраꙁъ>(singular) means L<face, image, picture, symbol, exampl
 template, etc.|https://histdict.uni-sofia.bg/dictionary/show/d_05616>
 in OCS/Old BG language. The name of the plugin is the plural variant in
 nominative case (обраꙁи).
+
+=head1 WORKFLOW
+
+    1. Images' owner and producer gives the direcory (probably zipped) to the
+        command runner.
+    2. The runner runs the command as shown in the SYNOPSIS.
+    3. The runner gives the produced csv file to the images producer. Fixes
+        problems with ICC profiles etc. Notifies the producer for eventual
+        naming convetions, possible problems. The producer fills in the
+        description and titles and gives back the file to the command-runner.
+        This may take some time.
+    4. The runner runs again the command with the new csv file, reviews the
+        produced file. Takes the HTML and puts it in a page on the Web.
+    5. The images' owner/producer enjois the gallery, prise him/herself with it
+        or goes back to the runner to report problems.
+    6. DONE or go to some of the previous steps.
 
 =head1 ATTRIBUTES
 
@@ -376,7 +392,7 @@ L<Mojolicious::Command> and implements the following new ones.
 
     The name of the CSV file which will be created in L</from_dir>. This file
     after being edited and after the images are processed will be copied
-    together iwth the images to L</to_dir>. Defaults to C<index.csv>.
+    together with the images to L</to_dir>. Defaults to C<index.csv>.
 
 =head2 defaults
 
@@ -396,7 +412,7 @@ file. TODO: Allow these to be passed on the command line via an argument C<--def
   my $description = $обраꙁи->description;
   $self       = $обраꙁи->description('Foo');
 
-Short description of this command, used for the command list.
+Short description of this command, used for the application's command list.
 
 =head2 files_per_subproc
 
@@ -405,7 +421,7 @@ Short description of this command, used for the command list.
 
 Number of files to be processed by one subprocess. Defaults to
 C<int($number_of_images/$self->subprocs_num) +1>. The last chunk of files is
-the remainder — usually less.
+the remainder — usually smaller than the previous chunks.
 
 =head2 from_dir
 
@@ -433,8 +449,7 @@ An L<Imager> instance.
     my $self = $self->log(Mojo::Log->new)
 
 A L<Mojo::Log> instance. It is not the same as C<$self-E<gt>app-E<gt>log>. Used
-to output info, warnings and errors in the terminal or the application log if
-needed.
+to output info, warnings and errors in the terminal or the application log.
 
 =head2 matrix
 
@@ -471,7 +486,7 @@ is dumped into the index CSV file.
     $self = $self->max('1000x1000');
 
 A hash reference with keys C<width> and C<height>. Defaults to C<{width =>
-1000, height => 1000}>. Accepted as the command line argument C<--max>.
+1000, height => 1000}>. Can be changed via the command line argument C<--max>.
 
 =head2 subprocs_num
 
@@ -489,7 +504,8 @@ See also L</files_per_subproc>.
     $self = $self->thumbs('1000x1000');
 
 A hash reference with keys C<width> and C<height>. Defaults to C<{width =>
-1000, height => 1000}>. Accepted as the command line argument C<--thumbs>.
+1000, height => 1000}>. Can be changed via the command line argument
+C<--thumbs>.
 
 =head2 to_dir
 
@@ -498,7 +514,7 @@ A hash reference with keys C<width> and C<height>. Defaults to C<{width =>
 
 A L<Mojo::File> instance. Directory where the folder with the processed images
 will be put. Defaults to the C<public> forlder of the current application.
-Accepted as the command line argument C<--to_dir>.
+Can be changed via the command line argument C<--to_dir>.
 
 
 =head2 usage
@@ -516,7 +532,7 @@ L<Mojolicious::Command> and implements the following new ones.
 =head2 calculate_max_and_thumbs
 
     #   img_1000x1000.jpg, img_100x100.jpg
-    my ($img_filename, $thumb_filename) = $self->calculate_max_and_thumbs($decoded_path,$raw_path);
+    my ($img_filename, $thumb_filename) = $self->calculate_max_and_thumbs($decoded_path, $raw_path);
 
 Calculates the resized image dimensions according to the C<$self-E<gt>max>
 and C<$self-E<gt>thumbs> gallery contraints. Accepts the utf8 decoded path
@@ -531,6 +547,12 @@ L<Imager::Transformations/scale_calculate()>.
 
 Run this command.
 
+=head2 TEMPLATES
+
+L<Mojolicious::Command::Author::generate::obrazi> contains an embedded template
+C<obrazi.html>. TODO: Make the template inflatable and allow a template
+filename to be passed on the command-line.
+
 =head1 SEE ALSO
 
 L<Imager>, L<Text::CSV_XS>
@@ -543,6 +565,7 @@ __DATA__
 @@ obrazi.html
 % use Mojo::Base -signatures;
 % use Mojo::File qw(path);
+% use Mojo::Util qw(url_escape);
 <!DOCTYPE html>
 <html>
     <head>
@@ -581,7 +604,7 @@ __DATA__
                 z-index: 1024;
                 padding: 1em;
             }
-            section {
+            section[class^=level] {
                 display: none;
             }
             h2, section.level2 {
@@ -600,10 +623,11 @@ __DATA__
     </head>
     <body>
         <h1>Обраꙁи</h1>
+        <section tabindex="0" class="obrazi">
         <%#= $obrazi %>
 % my $col = 2;
 % my $idx =0;
-% my $img_idx = 0;
+% my $img_idx = 1;
 % for my $cat(@$categories){
 %    my $level = $cat->[1] =~ m|(/)|g;
 %    $level += 2; $idx++;
@@ -617,9 +641,9 @@ __DATA__
         <div class="col card"
             data-index="<%= $img_idx %>"
             title="<%= $img->[2] %>"
-            style="background-image :url('<%= $path->child($img->[-1])%>')">
+            style="background-image :url('<%= join '/', map {url_escape $_} @{$path->child($img->[-1])->to_array}%>')">
             <div class="image" id="<%= $img_idx %>"
-                style="background-image: url(<%= $path->child($img->[-2])%>)">
+                style="background-image: url(<%= join '/', map {url_escape $_} @{$path->child($img->[-2])->to_array} %>)">
                 <h1><%= $img->[2] %></h1>
                 <p><%= $img->[3] %></p>
             </div>
@@ -641,8 +665,11 @@ $('h2,h2,h3').click(function(e) {
 // open
 $('section .card').click(function(e){
     e.stopPropagation();
-    let id = $(e.target).data('index');
+    let self = $(e.target);
+    let id = self.data('index');
     $('#' + id).toggle('slow');
+    $('section .card').css({border:"0px"});
+    self.css({border: "1px solid #333"});
 });
 
 // close
@@ -651,10 +678,11 @@ $('section .card .image').click(function(e) {
     $(e.target).toggle('slow');
 });
 
-$('section').keydown(function(e) {
+$('section.obrazi,section[class^="level"]').keydown(function(e) {
     e.preventDefault();
     e.stopPropagation();
     // close this image and open
+    $('section .card').css({border:"0px"});
     let img = $('section .card .image:visible');
     if(img.get(0) == undefined) return;
     let id = img.attr('id');
@@ -664,11 +692,13 @@ $('section').keydown(function(e) {
             // the previous
             id--;
             $('#' + id).toggle('slow');
+            $('#' + id).parent().css({border: "1px solid #333"});
             break;
         case "ArrowRight":
             // the next
             id++;
             $('#' + id).toggle('slow');
+            $('#' + id).parent().css({border: "1px solid #333"});
             break;
         case "ArrowUp":
             // the previous
@@ -684,5 +714,6 @@ $('section').keydown(function(e) {
 img.toggle();
 });
 </script>
+        </section><!-- end section class="obrazi"-->
     </body>
 </html>

@@ -2,7 +2,7 @@ package Mojolicious::Plugin::Obrazi;
 use feature ':5.26';
 use Mojo::Base 'Mojolicious::Plugin';
 
-our $VERSION = '0.01';
+our $VERSION = '0.11';
 
 sub register {
   my ($self, $app) = @_;
@@ -26,7 +26,11 @@ Mojolicious::Plugin::Obrazi - Mojolicious Plugin
 
 =head1 DESCRIPTION
 
-L<Mojolicious::Plugin::Obrazi> is a L<Mojolicious> plugin.
+L<Mojolicious::Plugin::Obrazi> is a L<Mojolicious> plugin. It consists of a
+command that generates html for an images gallery and a not yet wirtten helper
+which produces HTML from a CSV file found in a directory containing images.
+While the command is functional already the plugin is empty. This is a yet
+early release. Todo: write the helper; prepare a demo page.
 
 =head1 METHODS
 
@@ -39,8 +43,14 @@ L<Mojolicious::Plugin> and implements the following new ones.
 
 Register plugin in L<Mojolicious> application.
 
+=head1 NOTES
+
+This plugin requires Perl 5.26+ and Mojolicious 9.17+.
+
 =head1 SEE ALSO
 
-L<Mojolicious>, L<Mojolicious::Guides>, L<https://mojolicious.org>.
+L<Mojolicious::Command::Author::generate::obrazi>,
+L<Mojolicious>, L<Mojolicious::Guides>, L<Slovo>,
+L<https://mojolicious.org>.
 
 =cut
