@@ -2,7 +2,7 @@ package Mojolicious::Plugin::Obrazi;
 use feature ':5.26';
 use Mojo::Base 'Mojolicious::Plugin';
 
-our $VERSION = '0.12';
+our $VERSION = '0.13';
 
 sub register {
   my ($self, $app) = @_;
