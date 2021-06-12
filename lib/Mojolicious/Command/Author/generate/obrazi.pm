@@ -23,9 +23,10 @@ has files_per_subproc => sub {
   my $all = scalar @{$_[0]->matrix} > 1 ? grep { $_->[1] =~ $FILETYPES } @{$_[0]->matrix} : 100;
   return int($all / $_[0]->subprocs_num) + 1;
 };
-has csv_filename => 'index.csv';
-has subprocs_num => 4;
-has to_dir       => sub { $_[0]->app->home->child('public') };
+has csv_filename  => 'index.csv';
+has subprocs_num  => 4;
+has template_file => '';
+has to_dir        => sub { $_[0]->app->home->child('public') };
 
 # Default titles and descriptions
 has defaults => sub { {
@@ -72,12 +73,17 @@ sub thumbs {
 
 sub run ($self, @args) {
   getopt \@args,
-    'f|from=s'   => \(my $from_dir     = $self->from_dir),
-    't|to=s'     => \(my $to_dir       = $self->to_dir),
-    'x|max=s'    => \(my $max          = $self->max),
-    's|thumbs=s' => \(my $thumbs       = $self->thumbs),
-    'i|index=s'  => \(my $csv_filename = $self->csv_filename),
+    'f|from=s'     => \(my $from_dir     = $self->from_dir),
+    'to=s'         => \(my $to_dir       = $self->to_dir),
+    'x|max=s'      => \(my $max          = $self->max),
+    's|thumbs=s'   => \(my $thumbs       = $self->thumbs),
+    'i|index=s'    => \(my $csv_filename = $self->csv_filename),
+    't|template=s' => \(my $template     = $self->template_file),
     ;
+  if ($template ne $self->template_file and not -f $template) {
+    Carp::croak("Template $template does not exist. " . "Please provide an existing template file.");
+  }
+  $self->template_file($template) if $template;
   $self->from_dir(path($from_dir)->to_abs)->to_dir(path($to_dir)->to_abs)->max($max)->thumbs($thumbs)
     ->csv_filename($csv_filename);
   $self->_do_csv->_resize_and_copy_to_dir->_do_html;
@@ -100,7 +106,12 @@ sub calculate_max_and_thumbs ($self, $path, $raw_path) {
   my $thumbs     = $self->thumbs;
   my %size       = %$max;
   my %thumb_size = %$thumbs;
-  if (not eval { $img = $imager->read(file => $raw_path) }) {
+  my $fh         = $raw_path->open();
+  unless ($fh->binmode) {
+    $log->warn(" !!! Skipping $path.  Error: " . $!);
+    return ('', '');
+  }
+  if (not eval { $img = $imager->read(fh => $fh) }) {
     $log->warn(" !!! Skipping $path. Image error: " . $imager->errstr());
     return ('', '');
   }
@@ -299,41 +310,37 @@ sub _process_chunk_of_files ($self, $files = []) {
 
 sub _do_html($self) {
   state $app = $self->app;
-  my $categories = $self->matrix->grep(sub { !$_->[-1] && !$_->[-2] && $_->[1] =~ /$_->[0]$/ });
-  my $processed  = $self->_processed;
+  my $categories    = $self->matrix->grep(sub { !$_->[-1] && !$_->[-2] && $_->[1] =~ /$_->[0]$/ });
+  my $processed     = $self->_processed;
+  my $template_file = $self->template_file;
+  my $vars          = {
+    generator  => __PACKAGE__,
+    categories => $categories,
+    processed  => $processed,
+    app        => $app,
+    thumbs     => $self->thumbs
+  };
+  if ($template_file) {
 
-#  my $obrazi     = $categories->map(sub($cat) {
-#    my $level = $cat->[1] =~ m|(/)|g;
-#    $level += 2;
-#    my $title   = $app->t('h' . $level, id => $cat->[1], $cat->[2]);
-#    my $images  = $processed->map(sub($img) { $cat->[0] eq $img->[0] ? $img : (); });
-#    my $section = $images->map(sub($img) {
-#      my $path = path($cat->[1]);
-#      $app->t(
-#        'div',
-#        class => "card col",
-#        sub { $app->t('img', 'data-img' => $path->child($img->[-2]), src => $path->child($img->[-1])); }
-#      );
-#    })->join($/);
-#    return $title . $app->t('section', class => 'row', sub { $/ . $section });
-#  })->join($/);
+    my $html = Mojo::Template->new($self->template)->name($template_file)->render_file($template_file => $vars);
+    $self->to_dir->child(path($template_file)->basename =~ s/\.ep$//r)->spurt(encode _U, $html);
+  }
+  else {
+    my $tpl = 'obrazi.html';
+    $self->write_file($self->to_dir->child($tpl), encode _U, $self->render_data($tpl => $vars));
+  }
 
-  my $html_file = $self->to_dir->child('obrazi.html');
-
-  #my $html = $self->render_data('obrazi.html', {obrazi => $obrazi});
-  my $html = $self->render_data('obrazi.html',
-    {categories => $categories, processed => $processed, app => $app, thumbs => $self->thumbs});
-  $self->write_file($html_file => encode _U, $html);
-  $self->chmod_file($html_file, oct(644));
-
+  return;
 }
+
 1;
 
 =encoding utf8
 
 =head1 NAME
 
-Mojolicious::Command::Author::generate::obrazi - a gallery generator command
+Mojolicious::Command::Author::generate::obrazi - Обраꙁи for your site – a
+gallery generator command
 
 =head1 SYNOPSIS
 
@@ -347,15 +354,17 @@ Mojolicious::Command::Author::generate::obrazi - a gallery generator command
         --to /opt/myapp/public/albums/summer-2021 -x 800x600 -s 96x96
 
   Options:
-    -h, --help   Show this summary of available options
-    -f, --from   Root of directory structure from which the images
-                 will be taken. Defaults to ./.
-    -t, --to     Root directory where the gallery will be put. Defaults to ./.
-    -x, --max    Maximal image dimesnions in pixels in format 'widthxheight'.
-                 Defaults to 1000x1000.
-    -s, --thumbs Thumbnails maximal dimensions. Defaults to 100x100 pixels.
-    -i, --index  Name of the CSV index file to be generated or read in the
-                 --from directory.
+    -h, --help       Show this summary of available options
+    -f, --from       Root of directory structure from which the images
+                     will be taken. Defaults to ./.
+        --to         Root directory where the gallery will be put. Defaults to ./.
+    -x, --max        Maximal image dimesnions in pixels in format 'widthxheight'.
+                     Defaults to 1000x1000.
+    -s, --thumbs     Thumbnails maximal dimensions. Defaults to 100x100 pixels.
+    -i, --index      Name of the CSV index file to be generated or read in the
+                     --from directory.
+    -t, --template   Path to template file. Defaults to embedded template
+                     obrazi.html.ep.
 
 =head1 DESCRIPTION
 
@@ -520,6 +529,15 @@ Integer, used to split the number of files found into equal chunks, each of
 which will be processed in a separate subprocess in parallel. Defaults to 4.
 See also L</files_per_subproc>.
 
+=head2 template_file
+
+    my $self = $self->template_file('path/to/template.html.ep');
+    my $tpl  = $self->template_file;
+
+Path to template file to be used for generating the HTML for the gallery.
+Defaults to embedded template obrazi.html.ep. Can be passed as argument on the
+command-line via C<--template>.
+
 =head2 thumbs
 
     my $thumbs_sizes = $self->thumbs; #{width => 1000, height => 1000}
@@ -573,8 +591,7 @@ Run this command.
 =head2 TEMPLATES
 
 L<Mojolicious::Command::Author::generate::obrazi> contains an embedded template
-C<obrazi.html>. TODO: Make the template inflatable and allow a template
-filename to be passed on the command-line.
+C<obrazi.html.ep>. TODO: Make the template inflatable.
 
 =head1 SEE ALSO
 
@@ -592,12 +609,12 @@ __DATA__
 @@ obrazi.html
 % use Mojo::Base -signatures;
 % use Mojo::File qw(path);
-% use Mojo::Util qw(url_escape);
 <!DOCTYPE html>
 <html>
     <head>
         <meta charset="utf-8" />
         <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="<%= $generator %>" />
         <title>Обраꙁи</title>
         <script
 			  src="https://code.jquery.com/jquery-3.6.0.min.js"
@@ -630,11 +647,12 @@ __DATA__
                 top: 0;
                 display: none;
                 z-index: 1024;
+                cursor: default;
             }
             section .card .image h4 {
                 margin-left: 0;
             }
-            .image .meta {
+            section .card .image .meta {
                 position: absolute;
                 bottom: 0;
                 left:0;
@@ -652,6 +670,7 @@ __DATA__
                 padding-left: 3rem !important;
                 padding-right: 3rem !important;
                 height: 6rem;
+                cursor: pointer;
             }
             section[class^=level] {
                 display: none;
@@ -673,26 +692,27 @@ __DATA__
     <body>
         <h1>Обраꙁи</h1>
         <section tabindex="0" class="obrazi">
-        <%#= $obrazi %>
-% my $col = 2;
-% my $idx =0;
+% my $cols     = int(12/2); #6
+% my $idx     = 0;
 % my $img_idx = 1;
-% for my $cat(@$categories){
+% for my $cat(['','',''], @$categories) {
+%    my $images  = $processed->map(sub($img) { $cat->[0] eq $img->[0] ? $img : (); });
+%    next unless @$images;
 %    my $level = $cat->[1] =~ m|(/)|g;
 %    $level += 2; $idx++;
-<h<%= $level %> data-index="<%= $idx %>"><%= $cat->[2] %></h<%= $level %>>
-%    my $images  = $processed->map(sub($img) { $cat->[0] eq $img->[0] ? $img : (); });
+% if($cat->[2]) {
+        <h<%= $level %> data-index="<%= $idx %>"><%= $cat->[2] %></h<%= $level %>>
+% }
 <section tabindex="<%= $idx %>" class="idx<%= $idx %> level<%= $level %>">
-%    while(my @row = splice @$images, 0,int(12/$col)) {
+%    while(my @row = splice @$images, 0, $cols) {
     <div class="row">
     %   for my $img(@row) { $img_idx++;
-    %       my $path = path($cat->[1]);
         <div class="col card"
             data-index="<%= $img_idx %>"
             title="<%= $img->[2] %>"
-            style="background-image :url('<%= join '/', map {url_escape $_} @{$path->child($img->[-1])->to_array}%>')">
+            style="background-image :url('<%= path($cat->[1]||(), $img->[-1])%>')">
             <div class="image" id="<%= $img_idx %>"
-                style="background-image: url(<%= join '/', map {url_escape $_} @{$path->child($img->[-2])->to_array} %>)">
+                style="background-image: url('<%= path($cat->[1]||(), $img->[-2]) %>')">
                 <div class="prev-next">
                     <div data-index="<%= $img_idx %>" class="prev pull-left text-left text-light">⏴</div>
                     <div data-index="<%= $img_idx %>" class="next pull-right text-right text-light">⏵</div>
@@ -755,6 +775,10 @@ $('section.obrazi,section[class^="level"]').keydown(function(e) {
     // close the currently visible image...
     let img = $('section .card .image:visible');
     if(img.get(0) === undefined) return;
+    if(e.key === 'Escape'){
+        img.hide();
+        return;
+    }
     let id = img.attr('id');
     re_prev = /^Arrow(Left|Up)$/;
     re_next = /^Arrow(Right|Down)$/;
