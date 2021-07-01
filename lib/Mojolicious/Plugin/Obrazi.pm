@@ -2,7 +2,7 @@ package Mojolicious::Plugin::Obrazi;
 use Mojo::Base 'Mojolicious::Plugin', -signatures;
 use feature ':5.26';
 
-our $VERSION = '0.13';
+our $VERSION = '0.14';
 
 my sub _obrazi {
   return 'Helper obrazi(…) is not implemented yet…';
@@ -32,8 +32,8 @@ Mojolicious::Plugin::Obrazi - Mojolicious Plugin
 =head1 DESCRIPTION
 
 L<Mojolicious::Plugin::Obrazi> is a L<Mojolicious> plugin. It consists of a
-L<Mojolicious::Command::Author::generate::obrazi|command> that generates html
-for an images gallery and a not yet wirtten L</obrazi|helper> which produces
+command — L<Mojolicious::Command::Author::generate::obrazi>, that generates html
+for an images gallery and a not yet wirtten L<helper|/obrazi> which produces
 HTML from a CSV file found in a directory, containing images. While the command
 is functional already the plugin is empty. This is a yet early release. Todo:
 write the helper.

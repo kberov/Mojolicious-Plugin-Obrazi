@@ -396,9 +396,9 @@ command runner (a human yet).
 3. The runner gives back the produced csv file to the images' producer. Fixes
 problems with ICC profiles etc. Notifies the producer for eventual naming
 convetions, possible problems. The producer fills in the description and titles
-in the comfort of L<https://www.libreoffice.org/discover/calc/|LibreOffice
-Calc> or MS Excel and returns the file to the command-runner. This may take
-some time.
+in the comfort of L<LibreOffice
+Calc|https://www.libreoffice.org/discover/calc/> or MS Excel and returns the
+file to the command-runner. This may take some time.
 
 4. The runner runs again the command with the new csv file, reviews the
 produced file. Takes the HTML and puts it in a page on the Web.
@@ -609,7 +609,7 @@ C<obrazi.html.ep>. TODO: Make the template inflatable.
 Here is a hopefully growing list of URLs of galleries produced with this
 software.
 
-L<https://слово.бг/хѫдожьство/mario_berov.bg.html|Творби на Марио Беров> — a
+L<Творби на Марио Беров|https://слово.бг/хѫдожьство/mario_berov.bg.html> — a
 gallery, presenting works of the Bulgarian Orthodox icon painter Mario Berov.
 
 =head1 SEE ALSO
