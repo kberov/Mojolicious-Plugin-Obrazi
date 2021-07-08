@@ -5,10 +5,11 @@ use Mojo::File 'path';
 use Mojo::Util qw(url_escape punycode_decode punycode_encode getopt encode decode dumper);
 use Mojo::Collection 'c';
 use Text::CSV_XS qw( csv );
+use Mojo::Loader qw(data_section);
 use Imager;
 
-my $_formats  = join '|', 'jpg', keys %Imager::formats;
-my $FILETYPES = qr/(?:$_formats)$/i;
+my $_formats  = join '|', map { $_ =~ /jpe?g/i ? 'jpe?g' : $_ } sort keys %Imager::formats;
+my $FILETYPES = qr/\.(?:$_formats)$/i;
 my sub _U {'UTF-8'}
 has description => 'Generate a gallery from a directory structure with images';
 
@@ -17,15 +18,21 @@ has log => sub {
   Mojo::Log->new(format => sub { "[$$] [$_[1]] " . join(' ', @_[2 .. $#_]) . $/ });
 };
 
-has usage             => sub { shift->extract_usage };
-has from_dir          => sub { path('./')->to_abs };
+has usage    => sub { shift->extract_usage . $/ . 'Supported formats: ' . $FILETYPES . $/ };
+has from_dir => sub { path('./')->to_abs };
+has images   => sub {
+  $_[0]->matrix->grep(sub { $_->[1] =~ $FILETYPES });
+};
+has categories => sub {
+  $_[0]->matrix->grep(sub { !$_->[-1] && !$_->[-2] && $_->[1] =~ /$_->[0]$/ });
+};
 has files_per_subproc => sub {
-  my $all = scalar @{$_[0]->matrix} > 1 ? grep { $_->[1] =~ $FILETYPES } @{$_[0]->matrix} : 100;
-  return int($all / $_[0]->subprocs_num) + 1;
+  return int(scalar(@{$_[0]->images}) / $_[0]->subprocs_num) + 1;
 };
 has csv_filename  => 'index.csv';
 has subprocs_num  => 4;
 has template_file => '';
+has obrazec_file  => '';
 has to_dir        => sub { $_[0]->app->home->child('public') };
 
 # Default titles and descriptions
@@ -45,7 +52,7 @@ has imager => sub { Imager->new };
 
 my @header = qw(category path title description author image thumbnail);
 
-# images to be resized
+# csv file contents
 has matrix => sub { c([@header]) };
 
 # resized images
@@ -79,15 +86,21 @@ sub run ($self, @args) {
     's|thumbs=s'   => \(my $thumbs       = $self->thumbs),
     'i|index=s'    => \(my $csv_filename = $self->csv_filename),
     't|template=s' => \(my $template     = $self->template_file),
+    'o|obrazec=s'  => \(my $obrazec      = $self->obrazec_file),
     ;
   if ($template ne $self->template_file and not -f $template) {
     Carp::croak("Template $template does not exist. " . "Please provide an existing template file.");
   }
   $self->template_file($template) if $template;
+
+  if ($obrazec ne $self->obrazec_file and not -f $obrazec) {
+    Carp::croak("Single image template $obrazec does not exist. " . "Please provide an existing template file.");
+  }
+  $self->obrazec_file($obrazec) if $obrazec;
+
   $self->from_dir(path($from_dir)->to_abs)->to_dir(path($to_dir)->to_abs)->max($max)->thumbs($thumbs)
     ->csv_filename($csv_filename);
-  $self->_do_csv->_resize_and_copy_to_dir->_do_html;
-  return;
+  return $self->_do_csv->_resize_and_copy_to_dir->_do_html;
 }
 
 # Calculates the resized image dimensions according to the C<$self-E<gt>max>
@@ -146,8 +159,8 @@ sub _do_csv ($self, $root = $self->from_dir) {
   my $log = $self->log;
   if (-f $csv_filepath) {
     $log->info("$csv_filepath already exists.$/"
-        . "\tIf you want to refresh it, please remove it.$/"
-        . "\tContinuing with resizing and copying files...$/");
+        . "\tContinuing with resizing and copying images.$/"
+        . "\tSome rows may be updated with filenames for resized images and thumbnails...$/");
     return $self;
   }
   my $category = '';
@@ -205,18 +218,13 @@ sub _resize_and_copy_to_dir($self) {
     $matrix = c @{csv(in => $csv_filepath, enc => _U, binary => 1, sep_char => ",")};
     $self->matrix($matrix);
   }
-  my @files = grep { $_->[1] =~ $FILETYPES } @{$_[0]->matrix};
+
   my @subprocs;
   my $chunk_size = $self->files_per_subproc;
-  while (my @chunk = splice @files, 0, $chunk_size) {
+  my $images     = $self->images->map(sub { [@$_] });    #copy
+  while (my @chunk = splice @$images, 0, $chunk_size) {
     push @subprocs, $self->_process_chunk_of_files(\@chunk);
   }
-
-#  foreach my $s (@subprocs) {
-#
-#    # Start event loop if necessary
-#    $s->ioloop->start unless $s->ioloop->is_running;
-#  }
 
   foreach my $s (@subprocs) {
 
@@ -225,8 +233,29 @@ sub _resize_and_copy_to_dir($self) {
   }
   $self->log->info('All subprocesses finished.');
 
-  my $copied = path($csv_filepath)->copy_to($self->to_dir);
-  $self->log->info("$csv_filepath copied to $copied");
+  # Update image and thumbnail columns and write the new csv file
+  my $_processed = $self->_processed;
+  my $updated    = 0;
+  $self->matrix->each(sub {
+    return unless $_->[1] =~ $FILETYPES;
+    for my $i (0 .. @$_processed - 1) {
+      if ($_->[1] eq $_processed->[$i][1] && ($_->[-1] ne $_processed->[$i][-1] || $_->[-2] ne $_processed->[$i][-2])) {
+        ($_) = splice @$_processed, $i, 1;
+        $updated++;
+        last;
+      }
+    }
+  });
+  if ($updated) {
+    csv(in => $matrix->to_array, enc => _U, out => \my $data, binary => 1, sep_char => ",");
+    path($csv_filepath)->spurt($data);
+    my $copied = path($csv_filepath)->copy_to($self->to_dir);
+    $self->log->info("$csv_filepath *updated* and copied to $copied");
+  }
+  else {
+    my $copied = path($csv_filepath)->copy_to($self->to_dir);
+    $self->log->info("$csv_filepath copied to $copied");
+  }
   return $self;
 }
 
@@ -247,8 +276,9 @@ sub _process_chunk_of_files ($self, $files = []) {
       my $to_path    = $to_dir->child($row->[1])->dirname;
       my $sized_path = $to_path->child($row->[-2])->to_string;
       my $thumb_path = $to_path->child($row->[-1])->to_string;
-      if (-s $sized_path && -s $thumb_path) {
-        $log->info("$row->[-2] and $row->[-1] were already produced. Skipping ...");
+      my $html_path  = "$sized_path.html";
+      if (-s $sized_path && -s $thumb_path && -s $html_path) {
+        $log->info("$row->[-2].html, $row->[-2] and $row->[-1] were already produced. Skipping ...");
         push @$processed, $row;
         next;
       }
@@ -257,7 +287,7 @@ sub _process_chunk_of_files ($self, $files = []) {
       @sized{qw(xpixels ypixels)} = $row->[-2] =~ /_(\d+)x(\d+)\./;
       @thumb{qw(xpixels ypixels)} = $row->[-1] =~ /_(\d+)x(\d+)\./;
       my $img;
-      if (not eval { $img = $imager->read(file => $raw_path) }) {
+      unless (eval { $img = $imager->read(file => $raw_path) }) {
         $log->warn(" !!! Skipping $row->[1]. Image error: " . $imager->errstr());
         next;
       }
@@ -283,6 +313,9 @@ sub _process_chunk_of_files ($self, $files = []) {
       else {
         $log->info("Written $thumb_path.");
       }
+
+      # Generate single image html file for sharing on social medias
+      $self->render_obrazec_to_file($row, $html_path);
       push @$processed, $row;
     }
     return $$, $processed;
@@ -293,46 +326,74 @@ sub _process_chunk_of_files ($self, $files = []) {
       # new csv file, which can be saved in the $to_dir.
       # TODO: think if this is needed or we can just copy the initially produced
       # csv file to $to_dir.
-      $log->info("PID $pid processed " . (scalar @$processed) . ' files!');
+      $log->info("PID $pid processed " . (scalar @$processed) . ' images!');
       push @{$self->_processed}, @$processed;
-
-      #for my $row(@$processed) {
-      #  my $to_path = $to_dir->child($row->[1])->dirname;
-      #  $log->info($to_path->child($row->[-2]));
-      #  $log->info($to_path->child($row->[-1]));
-      #}
+      return;
     }
   )->catch(sub ($err) {
     $log->warn("Subprocess error: $err") if $err;
   });
-
 }
 
 sub _do_html($self) {
   state $app = $self->app;
-  my $categories    = $self->matrix->grep(sub { !$_->[-1] && !$_->[-2] && $_->[1] =~ /$_->[0]$/ });
+  my $categories    = $self->categories;
   my $processed     = $self->_processed;
   my $template_file = $self->template_file;
+  my $tpl           = $template_file || 'obrazi.html';
+  my $css_file      = 'obrazi.css';
+  my $js_file       = 'obrazi.js';
   my $vars          = {
     generator  => __PACKAGE__,
     categories => $categories,
     processed  => $processed,
     app        => $app,
-    thumbs     => $self->thumbs
+    thumbs     => $self->thumbs,
+    css_file   => $css_file,
+    js_file    => $js_file,
   };
+
+  $self->write_file($self->to_dir->child($css_file), $self->render_data($css_file => $vars));
+  $self->write_file($self->to_dir->child($js_file),  $self->render_data($js_file  => $vars));
   if ($template_file) {
 
     my $html = Mojo::Template->new($self->template)->name($template_file)->render_file($template_file => $vars);
     $self->to_dir->child(path($template_file)->basename =~ s/\.ep$//r)->spurt(encode _U, $html);
   }
   else {
-    my $tpl = 'obrazi.html';
     $self->write_file($self->to_dir->child($tpl), encode _U, $self->render_data($tpl => $vars));
   }
 
-  return;
+  return $self;
 }
 
+sub render_obrazec_to_file ($self, $img, $html_path) {
+  state $obrazec_file = $self->obrazec_file;
+  state $obrazec_data = 'obrazec.html';
+  state $mt           = Mojo::Template->new(vars => 1, name => $obrazec_file || $obrazec_data);
+  state $parsed       = 0;
+  my $categories = $self->categories;
+  my $c          = 0;
+  my $images     = $self->images;
+  my $linked
+    = {map { $_->[1] => {self => $_, prev => $images->[$c - 1], next => $images->[$c + 1], id => ++$c,} } @$images};
+
+  if ($obrazec_file && !$parsed) {
+    $mt->parse(decode _U, path($obrazec_file)->slurp);
+    $parsed = 1;
+  }
+  elsif (!$obrazec_file && !$parsed) {
+    my $template = data_section(ref $self, $obrazec_data);
+    $mt->parse($template);
+    $parsed = 1;
+  }
+  my $cat = $categories->first(sub { $_->[0] eq $img->[0] });
+
+  my $html = $mt->process(
+    {generator => __PACKAGE__, self => $self, app => $self->app, img => $img, cat => $cat, linked => $linked});
+  $self->write_file($html_path, encode _U, $html);
+  return;
+}
 1;
 
 =encoding utf8
@@ -346,40 +407,45 @@ gallery generator command
 
   Usage: APPLICATION generate obrazi [OPTIONS]
 
-    ./myapp.pl generate obrazi --from --to
+  Examples:
+    ./myapp.pl help generate obrazi # This help
+
     mojo generate obrazi --from ~/Pictures/summer-2021 \
         --to /opt/myapp/public/summer-2021
 
     mojo generate obrazi --from ~/Pictures/summer-2021 \
-        --to /opt/myapp/public/albums/summer-2021 -x 800x600 -s 96x96
+        --to /opt/some/static/site/albums/summer-2021 \
+        -x 800x600 -s 96x96 -t ./some/custom_template.html.ep
 
   Options:
     -h, --help       Show this summary of available options
     -f, --from       Root of directory structure from which the images
                      will be taken. Defaults to ./.
         --to         Root directory where the gallery will be put. Defaults to ./.
-    -x, --max        Maximal image dimesnions in pixels in format 'widthxheight'.
+    -x, --max        Maximum image dimesnions in pixels in format 'widthxheight'.
                      Defaults to 1000x1000.
     -s, --thumbs     Thumbnails maximal dimensions. Defaults to 100x100 pixels.
-    -i, --index      Name of the CSV index file to be generated or read in the
-                     --from directory.
+    -i, --index      Name of the CSV index file to be generated and then read
+                     in the --from directory.
     -t, --template   Path to template file. Defaults to embedded template
-                     obrazi.html.ep.
+                     obrazi.html.
+    -o, --obrazec    Path to single image template file for sharing on social
+                     media. Defaults to embedded template obrazec.html
 
 =head1 DESCRIPTION
 
 L<Mojolicious::Command::Author::generate::obrazi> generates a gallery from a
 directory structure, containing images. The produced gallery is a static html
-file which content can be easily taken, modified, and embedded into a page in
-any site.
+file which body content can be easily taken, modified, and embedded into a page
+in any site.
 
-In addition the command generates a csv file describing the images. This file
-can be edited. Titles and descriptions can be added for each image and then the
-command can be run again to regenerate the gallery with the new titles and
-descriptions. This file can be further used by a helper —
-L<Mojolicious::Plugin::Obrazi/obrazi> to produce and embed the HTML for the
-galery into a L<Mojolicious> application. Please note that the helper is not
-yet implemented.
+In addition the command generates a csv file on the first traversal of the
+directory structure, describing the images. This file can be edited. Titles and
+descriptions can be added for each image and then the command can be run again
+to regenerate the gallery with the modified titles and descriptions. This file
+can be further used by a helper — L<Mojolicious::Plugin::Obrazi/obrazi> to
+produce and embed the HTML for the galery into a L<Mojolicious> application.
+Please note that the helper is not yet implemented.
 
 The word B<обраꙁъ>(singular) means L<face, image, picture, symbol, example,
 template, etc.|https://histdict.uni-sofia.bg/dictionary/show/d_05616>
@@ -400,7 +466,7 @@ in the comfort of L<LibreOffice
 Calc|https://www.libreoffice.org/discover/calc/> or MS Excel and returns the
 file to the command-runner. This may take some time.
 
-4. The runner runs again the command with the new csv file, reviews the
+4. The runner runs again the command with the modified csv file, reviews the
 produced file. Takes the HTML and puts it in a page on the Web.
 
 5. The images' owner/producer enjoys the gallery, prise him/herself with it or
@@ -418,13 +484,22 @@ Produces an index CSV file which can be edited to add titles and descriptions
 for the images.
 
 Produces an HTML file with fully functional lightbox-like gallery, implemented
-only using jQuery  and CSS – no plugins. Left/right keyboard buttons navigation
+only using jQuery and CSS – no jQ-plugins. Left/right keyboard buttons navigation
 to next and previous image.
 
 =head1 ATTRIBUTES
 
 L<Mojolicious::Command::Author::generate::obrazi> inherits all attributes from
 L<Mojolicious::Command> and implements the following new ones.
+
+=head2 categories
+
+  my $cat = $self->categories->first(sub { $_->[0] eq $img->[0] });
+
+A L<Mojo::Collection> instance, containing rows from the CSV file which are
+categories (directories). For this attribute to return meaningful data,
+C<$self-E<gt>matrix> must be already filled in from CSV file.
+
 
 =head2 csv_filename
 
@@ -447,7 +522,8 @@ command-line via the C<--index> argument.
 
 These values go to the folowing columns in the produced CSV file. C<title,
 description, author>. They are supposed to be replaced by editing the produced
-file. TODO: Allow these to be passed on the command line via an argument C<--defaults>.
+file. TODO: Maybe allow these to be passed on the command line via an argument
+C<--defaults>.
 
 =head2 description
 
@@ -470,7 +546,7 @@ the remainder — usually smaller than the previous chunks.
     $self = $обраꙁи->from_dir(path('./'));
     my $root_folder_abs_path = $обраꙁи->from_dir;
 
-Holds a L<Mojo::File> instance - absolute path to the directory from which the
+Holds a L<Mojo::File> instance — absolute path to the directory from which the
 pictures will be taken. This is where the CSV file describing the directory
 structure will be generated too. The value is taken from the commandline
 argument C<--from_dir>. Defaults to C<./> — current directory — where the
@@ -483,15 +559,26 @@ command is executed.
 
     my $self = $обраꙁи->imager(Imager->new);
 
-An L<Imager> instance.
+An L<Imager> instance. This is the images-processing engine, used by the
+command.
+
+=head2 images
+
+  my $images     = $self->images->map(sub { [@$_] });    #copy
+
+A L<Mojo::Collection> instance, containing rows from the CSV file which are
+image files, supported by L<Imager> and will be processed. For this attribute
+to return meaningful data, C<$self-E<gt>matrix> must be already filled in from
+CSV file.
 
 =head2 log
 
     my $log = $self->log;
     my $self = $self->log(Mojo::Log->new)
 
-A L<Mojo::Log> instance. It is not the same as C<$self-E<gt>app-E<gt>log>. Used
-to output info, warnings and errors in the terminal or the application log.
+A L<Mojo::Log> instance. By default it is not the same as
+C<$self-E<gt>app-E<gt>log>. Used to output info, warnings and errors to the
+terminal or the application log.
 
 =head2 matrix
 
@@ -519,16 +606,22 @@ to output info, warnings and errors in the terminal or the application log.
 
 A L<Mojo::Collection> instance. First row contains the headers. This matrix is
 filled in while recursively searching in the L</from_dir> for images. Then it
-is dumped into the index CSV file.
+is dumped into the index CSV file. If the CSV file is already present, the data
+is read directly from it.
 
 =head2 max
 
-    my $max_sizes = $self->max; #{width => 1000, height => 1000}
-    $self = $self->max(width => 1000, height => 1000);
+    my $max_sizes = $self->max; # {width => 1000, height => 1000}
+    $self = $self->max({width => 1000, height => 1000});
     $self = $self->max('1000x1000');
 
 A hash reference with keys C<width> and C<height>. Defaults to C<{width =>
 1000, height => 1000}>. Can be changed via the command line argument C<--max>.
+
+=head2 obrazec_file
+
+Path to template file for single html pages. Defaults to embedded template
+obrazec.html. Can be passed as argument on the command-line via C<--obrazec>.
 
 =head2 subprocs_num
 
@@ -545,13 +638,13 @@ See also L</files_per_subproc>.
     my $tpl  = $self->template_file;
 
 Path to template file to be used for generating the HTML for the gallery.
-Defaults to embedded template obrazi.html.ep. Can be passed as argument on the
+Defaults to embedded template obrazi.html. Can be passed as argument on the
 command-line via C<--template>.
 
 =head2 thumbs
 
-    my $thumbs_sizes = $self->thumbs; #{width => 100, height => 100}
-    $self = $self->thumbs(width => 100, height => 100);
+    my $thumbs_sizes = $self->thumbs; # {width => 100, height => 100}
+    $self = $self->thumbs({width => 100, height => 100});
     $self = $self->thumbs('1000x1000');
 
 A hash reference with keys C<width> and C<height>. Defaults to C<{width =>
@@ -574,7 +667,8 @@ directory is the root of your images' galery.
   my $usage = $обраꙁи->usage;
   $self = $обраꙁи->usage('Foo');
 
-Usage information for this command, used for the help screen.
+Usage information for this command, used for the help screen. At the bottom are
+shown the supported by L<Imager> image formats.
 
 =head1 METHODS
 
@@ -595,14 +689,15 @@ L<Imager::Transformations/scale_calculate()>.
 
 =head2 run
 
-  $makefile->run(@ARGV);
+  $обраꙁи = $обраꙁи->run(@ARGV);
 
 Run this command.
 
 =head2 TEMPLATES
 
-L<Mojolicious::Command::Author::generate::obrazi> contains an embedded template
-C<obrazi.html.ep>. TODO: Make the template inflatable.
+L<Mojolicious::Command::Author::generate::obrazi> contains three embedded templates
+C<obrazi.html>, C<obrazi.css> and C<obrazi.js>. 
+TODO: Maybe make the templates inflatable.
 
 =head1 DEMOS
 
@@ -617,13 +712,100 @@ gallery, presenting works of the Bulgarian Orthodox icon painter Mario Berov.
 L<Imager>, L<Text::CSV_XS>
 L<Mojolicious>, L<Mojolicious::Guides>, L<https://mojolicious.org>,
 
-L<jQuery – used for implementing the example embedded template|https://jquery.com/>,
+L<jQuery – used for implementing the lightbox functionality|https://jquery.com/>,
 
 L<Chota (A micro (~3kb) CSS framework) – also used for the example implementation|https://jenil.github.io/chota/>.
 
 =cut
 
 __DATA__
+
+@@ obrazi.css
+
+section > p {
+    padding: 1rem 2.5rem;
+}
+section .card {
+    background-position: center;
+    background-repeat: no-repeat;
+    max-width: <%= $thumbs->{width} + 15 %>px;
+    height: <%= $thumbs->{width} + 15 %>px;
+    overflow: hidden; /* Hide scrollbars */
+    cursor: pointer;
+    /* filter: blur(3px);
+    -webkit-filter: blur(3px); */
+}
+section .image {
+    width: 100% !important;
+    height: 100% !important;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    background-color: rgba(11, 11, 11, 0.9);
+    color: #fff;
+    text-shadow: 2px 2px 4px #000;
+    position: fixed;
+    box-sizing: border-box;
+    left: 0;
+    top: 0;
+    display: none;
+    z-index: 1024;
+    cursor: default;
+}
+section .image h4 {
+    margin-left: 0;
+}
+section .image h3.category {
+    position: absolute;
+    top: 0;
+    right:0;
+    padding: 1em;
+}
+section .image .meta {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    padding: 1em;
+    width: 100%;
+}
+.image .prev, .image .next {
+    position: relative;
+    top: 0;
+    padding-top: calc(100vh / 2 - 6rem / 2);
+    font-size: 6rem;
+    width: 10vw;
+    height: 100%;
+    border-radius: 10px;
+    cursor:pointer;
+    transition: background-color .5s;
+}
+.image .prev:hover, .image .next:hover {
+    background-color: rgba(55, 55, 55, 0.9);
+}
+section[class^="idx"] {
+    display: none;
+}
+h2, section.level2 {
+    margin-left:2rem;
+}
+h3, section.level3 {
+    margin-left:4rem;
+}
+h4, section.level4 {
+    margin-left:6rem;
+}
+h2.button, h3.button, h4.button {
+    display: block;
+    text-align: left;
+}
+
+.sharer {
+    display: inline-block;
+    background-color: #3b5998;
+    border-radius: 50%;
+    color: white;
+    font-weight: bolder;
+}
 
 @@ obrazi.html
 % use Mojo::File qw(path);
@@ -634,88 +816,12 @@ __DATA__
         <meta http-equiv="X-UA-Compatible" content="IE=edge" />
         <meta name="<%= $generator %>" />
         <title>Обраꙁи</title>
-        <script
-			  src="https://code.jquery.com/jquery-3.6.0.min.js"
-			  integrity="sha256-/xUj+3OJU5yExlq6GSYGSHk7tPXikynS7ogEvDej/m4="
-			  crossorigin="anonymous"></script>
-        <link rel="stylesheet" href="https://unpkg.com/chota@latest">
-        <style>
-            section .card {
-                background-position: center;
-                background-repeat: no-repeat;
-                max-width: <%= $thumbs->{width} + 15 %>px;
-                height: <%= $thumbs->{width} + 15 %>px;
-                overflow: hidden; /* Hide scrollbars */
-                cursor: pointer;
-                /* filter: blur(3px);
-                -webkit-filter: blur(3px); */
-            }
-            section .card .image {
-                width: 100% !important;
-                height: 100% !important;
-                background-position: center;
-                background-repeat: no-repeat;
-                background-size: contain;
-                background-color: rgba(11, 11, 11, 0.9);
-                color: #fff;
-                text-shadow: 2px 2px 4px #000;
-                position: fixed;
-                box-sizing: border-box;
-                left: 0;
-                top: 0;
-                display: none;
-                z-index: 1024;
-                cursor: default;
-            }
-            section .card .image h4 {
-                margin-left: 0;
-            }
-            section .card .image h3.category {
-                position: absolute;
-                top: 0;
-                right:0;
-                padding: 1em;
-            }
-            section .card .image .meta {
-                position: absolute;
-                bottom: 0;
-                left:0;
-                padding: 1em;
-            }
-            .image .prev, .image .next {
-		position: relative;
-		top: 0;
-		padding-top: calc(100vh / 2 - 6rem / 2);
-                font-size: 6rem;
-		width: 10vw;
-		height: 100%;
-		border-radius: 10px;
-		cursor:pointer;
-		transition: background-color .5s;
-            }
-	    .image .prev:hover, .image .next:hover {
-                background-color: rgba(55, 55, 55, 0.9);
-	    }
-            section[class^="idx"] {
-                display: none;
-            }
-            h2, section.level2 {
-                margin-left:2rem;
-            }
-            h3, section.level3 {
-                margin-left:4rem;
-            }
-            h4, section.level4 {
-                margin-left:6rem;
-            }
-            h2.button, h3.button, h4.button {
-                display: block;
-                text-align: left;
-            }
-        </style>
+        <script src="http://dev.xn--b1arjbl.xn--90ae:3000/mojo/jquery/jquery.js"></script>
+        <link rel="stylesheet" href="http://dev.xn--b1arjbl.xn--90ae:3000/css/malka/chota_all_min.css">
     </head>
     <body>
         <h1>Обраꙁи</h1>
+        <link rel="stylesheet" href="<%== $css_file %>" />
         <section tabindex="0" class="obrazi">
 % my $cols     = int(12/2); #6
 % my $idx     = 0;
@@ -726,9 +832,9 @@ __DATA__
 %    my $level = $cat->[1] =~ m|(/)|g;
 %    $level += 1; $idx++;
 % if($cat->[2]) {
-        <h<%= $level %> class="primary button" data-index="<%= $idx %>"><%= $cat->[2] %></h<%= $level %>>
+        <h<%= $level %> class="primary button" id="cat<%= $idx %>" data-index="<%= $idx %>"><%= $cat->[2] %></h<%= $level %>>
 % }
-<section tabindex="<%= $idx %>" class="idx<%= $idx %> level<%= $level %>">
+<section tabindex="<%= $idx %>" class="idx<%= $idx %>" level="<%= $level %>">
 <%= $app->t('p', $cat->[3]) if $cat->[3] %>
 %    while(my @row = splice @$images, 0, $cols) {
     <div class="row">
@@ -737,13 +843,16 @@ __DATA__
             data-index="<%= $img_idx %>"
             title="<%= $img->[2] %>"
             style="background-image :url('<%= path($img->[1])->dirname->child($img->[-1])%>')">
-            <div class="image" id="<%= $img_idx %>"
+            <div class="image" id="<%= $img_idx %>" data-category_id="#cat<%= $idx %>"
                 style="background-image: url('<%= path($img->[1])->dirname->child($img->[-2]) %>')">
                     <div data-index="<%= $img_idx %>" class="prev pull-left text-left text-light">⏴</div>
                     <div data-index="<%= $img_idx %>" class="next pull-right text-right text-light">⏵</div>
-		<h3 class="category text-right text-light"><%= $cat->[2] %></h3>
+		        <h3 class="category text-right text-light"><%= $cat->[2] %></h3>
                 <div class="meta">
                     <h4><%= $img->[2] %></h4>
+                    <a class="button sharer pull-right"
+                        target="_blank" href="https://www.facebook.com/sharer/sharer.php"
+                        title="Споделяне">f</a>
                     <p><%= $img->[3] %></p>
                 </div>
             </div>
@@ -754,13 +863,23 @@ __DATA__
 </section>
 % } # end for @$categories
         </section><!-- end section class="obrazi"-->
-<script>
+        <script src="<%= $js_file %>"></script>
+    </body>
+</html>
 
-// Clicking on a category title shows/hides the category's <section> element.
+@@ obrazi.js
+
+jQuery(function($){
+/*
+    Clicking on a category title shows/hides the category's <section> element.
+    Window.location reflects the current category #id.
+*/
+
 $('h1,h2,h3').click(function(e) {
     e.stopPropagation();
     let idx = $(e.target).data('index');
-    $('section.idx' + idx).toggle('slow');
+    let section = $('section.idx' + idx);
+    section.toggle('slow');
 })
 
 /*
@@ -775,6 +894,8 @@ $('section .card').click(function(e){
     $('#' + id).toggle('slow');
     $('section .card').css({border:"0px"});
     self.css({border: "1px solid #333"});
+    // let url  = location.toString().replace(/#.*?$/,'');
+    // location = `${url}#${id}`;    
 });
 
 /*
@@ -793,14 +914,15 @@ $('section .card .image').click(function(e) {
     up/down keypresses. When the corresponding key is pressed, the image box is
     replaced with the respectively previous or next image.
 */
-$('section.obrazi,section[class^="level"]').keydown(function(e) {
-    // e.preventDefault();
+$('section.obrazi').keydown(function(e) {
+    e.preventDefault();
     e.stopPropagation();
     $('section .card').css({border:"0px"});
     // close the currently visible image...
     let img = $('section .card .image:visible');
+    // alert(img.prop('id'));
     if(img.get(0) === undefined) return;
-    if(e.key === 'Escape'){
+    if(e.key === 'Escape') {
         img.hide();
         return;
     }
@@ -816,12 +938,15 @@ $('section.obrazi,section[class^="level"]').keydown(function(e) {
     }
     $('#' + id).toggle('slow');
     $('#' + id).parent().css({border: "1px solid #333"});
+    // Changing the location hash somehow disables the keydown event
+    // let url  = location.toString().replace(/#.*?$/,'');
+    // location = `${url}#${id}`;
     img.toggle(900);
 });
 
 /*
     Pressing the right and left buttons in the image closes the image and opens the
-    previous and next image.
+    previous and next image. Location reflects the current image id.
 */
 $('.image .prev, .image .next').click(function(e) {
     e.stopPropagation();
@@ -839,6 +964,95 @@ $('.image .prev, .image .next').click(function(e) {
     img.toggle(900);
 });
 
-</script>
+/*
+    Parse the hash and scroll down to the appropriate section.
+
+*/
+let hash = window.location.hash;
+let category_id = hash.match(/(^#cat\d+)$/);
+let image_id = hash.match(/^(#\d+)$/);
+if( category_id !== null ) {
+    // Click on the section button to expand it
+    $(category_id[1]).trigger('click');
+}
+else if(image_id !== null) {
+    $($(image_id[1]).data('category_id')).trigger('click');
+    // Click on the thumbnail button to expand it
+    $(image_id[1]).trigger('click');
+}
+
+$('.meta > .sharer').each(function(){
+    //let base        = location.toString().replace(/\/[^\/]+$/, '');
+    let url         = $(this).parent().parent().css('background-image').replace(/.+?["']([^"']+?)["'].+/,'$1') + '.html';
+    let sharer_url  = $(this).attr('href');
+    $(this).attr('href',`${sharer_url}?u=${url}`);
+});
+$('.sharer').click(function(e) {
+    e.stopPropagation();
+    return true;
+});
+});
+
+@@ obrazec.html
+<%
+use Mojo::File 'path';
+my $css_path = join '', map( {'../'} @{path($img->[1])->dirname->to_array}),'obrazi.css';
+my $js_path  = join '', map( {'../'} @{path($img->[1])->dirname->to_array}),'obrazi.js';
+my $prev     = path($linked->{$img->[1]}{prev}[1])->dirname->child($linked->{$img->[1]}{prev}[-2])
+  ->to_rel(path($img->[1])->dirname);
+my $next
+  = $linked->{$img->[1]}{next}
+  ? path($linked->{$img->[1]}{next}[1])->dirname->child($linked->{$img->[1]}{next}[-2])
+  ->to_rel(path($img->[1])->dirname)
+  : '';
+%>
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="<%= $generator %>">
+        <title><%= $img->[2] %>|<%= $cat->[2] %></title>
+        <script src="http://dev.xn--b1arjbl.xn--90ae:3000/mojo/jquery/jquery.js"></script>
+        <link rel="stylesheet" href="http://dev.xn--b1arjbl.xn--90ae:3000/css/malka/chota_all_min.css">
+        <link rel="stylesheet" href="<%== $css_path %>">
+        <meta name="author" content="<%= $img->[-3] %>">
+        <meta name="description" content="<%= $img->[3] %>">
+        <meta name="author" content="<%= $img->[-3] %>">
+        <meta property="og:type" content="image">
+        <meta property="og:image:title" content="<%= $img->[2] %>" >
+        <meta property="og:image:description" content="<%= $img->[3] %>" >
+        <meta property="og:image" content="<%= $img->[-2] %>" >
+        <meta property="og:image:width" content="<%= ($img->[-2] =~/(\d+)x/ && $1) %>">        
+        <meta property="og:image:height" content="<%= ($img->[-2] =~/x(\d+)/ && $1) %>">
+
+    </head>
+    <body>
+        <section tabindex="0">
+            <div class="image"
+                style="display:block; background-image: url('<%= $img->[-2] %>')">
+                    <a href="<%= $prev %>.html"><div class="prev pull-left text-left text-light">⏴</div></a>
+                    <% if($next) { %>
+                    <a href="<%= $next %>.html"><div class="next pull-right text-right text-light">⏵</div></a>
+                    <% } %>
+		        <h3 class="category text-right text-light"><%= $cat->[2] %></h3>
+                <div class="meta">
+                    <h4><%= $img->[2] %></h4>
+                    <a class="button sharer pull-right"
+                        target="_blank" href="https://www.facebook.com/sharer/sharer.php"
+                        title="Споделяне">f</a>
+                    <p><%= $img->[3] %></p>
+                </div>
+            </div>
+        </section>
+       <script>
+        
+$('.meta > .sharer').each(function(){
+    let url         = location.toString();
+    let sharer_url  = $(this).attr('href');
+    $(this).attr('href',`${sharer_url}?u=${url}`);
+});
+       </script>
     </body>
 </html>
+

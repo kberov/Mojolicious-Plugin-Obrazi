@@ -2,7 +2,7 @@ package Mojolicious::Plugin::Obrazi;
 use Mojo::Base 'Mojolicious::Plugin', -signatures;
 use feature ':5.26';
 
-our $VERSION = '0.14';
+our $VERSION = '0.15';
 
 my sub _obrazi {
   return 'Helper obrazi(…) is not implemented yet…';

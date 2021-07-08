@@ -23,12 +23,13 @@ my $help = sub {
     $t->app->start('generate', 'obrazi', '-h');
   }
 
-  like $buffer => qr/myapp.pl generate obrazi --from --to/ => 'SYNOPSIS';
-  like $buffer => qr/-f, --from/                           => 'SYNOPSIS --from';
-  like $buffer => qr/    --to/                             => 'SYNOPSIS --to';
-  like $buffer => qr/-x, --max/                            => 'SYNOPSIS --max';
-  like $buffer => qr/-s, --thumbs/                         => 'SYNOPSIS --thumbs';
-  like $buffer => qr/-i, --index/                          => 'SYNOPSIS --index';
+  like $buffer => qr/myapp.pl help generate obrazi/ => 'SYNOPSIS';
+  like $buffer => qr/-f, --from/                    => 'SYNOPSIS --from';
+  like $buffer => qr/    --to/                      => 'SYNOPSIS --to';
+  like $buffer => qr/-x, --max/                     => 'SYNOPSIS --max';
+  like $buffer => qr/-s, --thumbs/                  => 'SYNOPSIS --thumbs';
+  like $buffer => qr/-i, --index/                   => 'SYNOPSIS --index';
+  like $buffer => qr/-o, --obrazec/                 => 'SYNOPSIS --obrazec';
 };
 
 my $defaults = sub {
@@ -53,6 +54,8 @@ my $run = sub {
     local *STDERR = $handle;
     $command->run('-f' => $from_dir, '-to' => $random_tempdir);
   }
+
+  note 'to_dir:' . $command->to_dir;
 
   # note $buffer;
 TODO: {
@@ -85,7 +88,7 @@ my $run_custom = sub {
     );
   }
 TODO: {
-    local $TODO = 'We are not sure if the underling PNG library will warn or not.';
+    local $TODO = 'We are not sure if the underlying PNG library will warn or not.';
     like $buffer => qr/warn.+?Skipping.+?loga4.png. Image error: iCCP/, 'right warning';
   }
   like $buffer            => qr/loga16\.png/,                 'right file';
@@ -103,7 +106,7 @@ TODO: {
     1-7sbi9acdgbt_300x303\.png\,1-7sbi9acdgbt_119x120\.png/xsm, 'right calculate_max_and_thumbs';
   note 'to_dir:' . $command->to_dir;
 
-  # $File::Temp::KEEP_ALL = 1;
+  $File::Temp::KEEP_ALL = 1;
   my $outfile = path($command->template_file)->basename =~ s/\.ep$//r;
   my $output  = decode U, $command->to_dir->child($outfile)->slurp;
 
