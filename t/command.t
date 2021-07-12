@@ -5,6 +5,12 @@ use Test::Mojo;
 use Mojo::File qw(curfile path tempdir);
 use Mojo::Util qw(encode decode);
 use lib curfile->dirname->dirname->child('lib')->to_string;
+
+use Imager;
+unless ($Imager::formats{jpeg} && $Imager::formats{png}) {
+  plan skip_all => 'Tests are irrelevant without PNG and JPEG support.';
+}
+
 my $t              = Test::Mojo->new('Mojolicious');
 my $random_tempdir = tempdir('obraziXXXX', TMPDIR => 1, CLEANUP => 1);
 

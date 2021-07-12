@@ -23,6 +23,11 @@ has from_dir => sub { path('./')->to_abs };
 has images   => sub {
   $_[0]->matrix->grep(sub { $_->[1] =~ $FILETYPES });
 };
+has _linked_images => sub {
+  my $c      = 0;
+  my $images = $_[0]->images;
+  return {map { $_->[1] => {self => $_, prev => $images->[$c - 1], next => $images->[$c + 1], id => ++$c} } @$images};
+};
 has categories => sub {
   $_[0]->matrix->grep(sub { !$_->[-1] && !$_->[-2] && $_->[1] =~ /$_->[0]$/ });
 };
@@ -34,6 +39,7 @@ has subprocs_num  => 4;
 has template_file => '';
 has obrazec_file  => '';
 has to_dir        => sub { $_[0]->app->home->child('public') };
+has publish_url   => '/obrazi.html';
 
 # Default titles and descriptions
 has defaults => sub { {
@@ -87,6 +93,7 @@ sub run ($self, @args) {
     'i|index=s'    => \(my $csv_filename = $self->csv_filename),
     't|template=s' => \(my $template     = $self->template_file),
     'o|obrazec=s'  => \(my $obrazec      = $self->obrazec_file),
+    'u|url=s'      => \(my $url          = $self->publish_url),
     ;
   if ($template ne $self->template_file and not -f $template) {
     Carp::croak("Template $template does not exist. " . "Please provide an existing template file.");
@@ -99,7 +106,7 @@ sub run ($self, @args) {
   $self->obrazec_file($obrazec) if $obrazec;
 
   $self->from_dir(path($from_dir)->to_abs)->to_dir(path($to_dir)->to_abs)->max($max)->thumbs($thumbs)
-    ->csv_filename($csv_filename);
+    ->csv_filename($csv_filename)->publish_url(decode _U, $url);
   return $self->_do_csv->_resize_and_copy_to_dir->_do_html;
 }
 
@@ -282,36 +289,39 @@ sub _process_chunk_of_files ($self, $files = []) {
         push @$processed, $row;
         next;
       }
-      $log->info("Producing $row->[-2] and $row->[-1] from $row->[1] ...");
       my (%sized, %thumb);
       @sized{qw(xpixels ypixels)} = $row->[-2] =~ /_(\d+)x(\d+)\./;
       @thumb{qw(xpixels ypixels)} = $row->[-1] =~ /_(\d+)x(\d+)\./;
       my $img;
-      unless (eval { $img = $imager->read(file => $raw_path) }) {
-        $log->warn(" !!! Skipping $row->[1]. Image error: " . $imager->errstr());
-        next;
+      unless (-s $sized_path) {
+        unless (eval { $img = $imager->read(file => $raw_path) }) {
+          $log->warn(" !!! Skipping $row->[1]. Image error: " . $imager->errstr());
+          next;
+        }
+        unless (eval { $to_path->make_path({mode => 0711}); 1 }) {
+          $log->warn("!!! Skipping $row->[1]. Error: $@");
+          next;
+        }
+        my $maxi = $img->scale(%sized);
+        $maxi->settag(name => 'i_xres', value => 96);
+        $maxi->settag(name => 'i_yres', value => 96);
+        unless ($maxi->write(file => $sized_path)) {
+          $log->warn("!!! Cannot write image $sized_path!\nError:" . $maxi->errstr);
+        }
+        else {
+          $log->info("Written $sized_path");
+        }
       }
-      unless (eval { $to_path->make_path({mode => 0711}); 1 }) {
-        $log->warn("!!! Skipping $row->[1]. Error: $@");
-        next;
-      }
-      my $maxi = $img->scale(%sized);
-      $maxi->settag(name => 'i_xres', value => 96);
-      $maxi->settag(name => 'i_yres', value => 96);
-      unless ($maxi->write(file => $sized_path)) {
-        $log->warn("!!! Cannot write image $sized_path!\nError:" . $maxi->errstr);
-      }
-      else {
-        $log->info("Written $sized_path.");
-      }
-      my $thumbi = $img->scale(%thumb);
-      $thumbi->settag(name => 'i_xres', value => 96);
-      $thumbi->settag(name => 'i_yres', value => 96);
-      unless ($thumbi->write(file => $thumb_path)) {
-        $log->warn("!!! Cannot write image $thumb_path!\nError:" . $thumbi->errstr);
-      }
-      else {
-        $log->info("Written $thumb_path.");
+      unless (-s $thumb_path) {
+        my $thumbi = $img->scale(%thumb);
+        $thumbi->settag(name => 'i_xres', value => 96);
+        $thumbi->settag(name => 'i_yres', value => 96);
+        unless ($thumbi->write(file => $thumb_path)) {
+          $log->warn("!!! Cannot write image $thumb_path!\nError:" . $thumbi->errstr);
+        }
+        else {
+          $log->info("Written $thumb_path");
+        }
       }
 
       # Generate single image html file for sharing on social medias
@@ -351,6 +361,8 @@ sub _do_html($self) {
     thumbs     => $self->thumbs,
     css_file   => $css_file,
     js_file    => $js_file,
+    linked     => $self->_linked_images,
+    self       => $self,
   };
 
   $self->write_file($self->to_dir->child($css_file), $self->render_data($css_file => $vars));
@@ -373,25 +385,27 @@ sub render_obrazec_to_file ($self, $img, $html_path) {
   state $mt           = Mojo::Template->new(vars => 1, name => $obrazec_file || $obrazec_data);
   state $parsed       = 0;
   my $categories = $self->categories;
-  my $c          = 0;
-  my $images     = $self->images;
-  my $linked
-    = {map { $_->[1] => {self => $_, prev => $images->[$c - 1], next => $images->[$c + 1], id => ++$c,} } @$images};
 
   if ($obrazec_file && !$parsed) {
     $mt->parse(decode _U, path($obrazec_file)->slurp);
     $parsed = 1;
   }
   elsif (!$obrazec_file && !$parsed) {
-    my $template = data_section(ref $self, $obrazec_data);
-    $mt->parse($template);
+    $mt->parse(data_section(ref $self, $obrazec_data));
     $parsed = 1;
   }
-  my $cat = $categories->first(sub { $_->[0] eq $img->[0] });
 
   my $html = $mt->process(
-    {generator => __PACKAGE__, self => $self, app => $self->app, img => $img, cat => $cat, linked => $linked});
-  $self->write_file($html_path, encode _U, $html);
+    {
+      generator  => __PACKAGE__,
+      self       => $self,
+      app        => $self->app,
+      img        => $img,
+      categories => $categories,
+      linked     => $self->_linked_images
+    }
+  );
+  path($html_path)->spurt(encode _U, $html) && $self->log->info("Written $html_path");
   return;
 }
 1;
@@ -431,6 +445,8 @@ gallery generator command
                      obrazi.html.
     -o, --obrazec    Path to single image template file for sharing on social
                      media. Defaults to embedded template obrazec.html
+    -u, --url        Url where the gallery will be published.
+                     Defaults to '/obrazi.html'.
 
 =head1 DESCRIPTION
 
@@ -623,6 +639,16 @@ A hash reference with keys C<width> and C<height>. Defaults to C<{width =>
 Path to template file for single html pages. Defaults to embedded template
 obrazec.html. Can be passed as argument on the command-line via C<--obrazec>.
 
+=head2 publish_url
+
+  $обраꙁи->publish_url($string); # $self
+  $обраꙁи->publish_url; # $string
+
+String. Url path or preferably full url, where the gallery will reside. Needed
+for link from individual images to the common gallery page and OpenGraph meta
+data. Can be passed as argument on the command-line via C<--url>. Defaults
+to C</obrazi.html> – rarely what you need.
+
 =head2 subprocs_num
 
     $self->subprocs_num; #4
@@ -695,8 +721,15 @@ Run this command.
 
 =head2 TEMPLATES
 
-L<Mojolicious::Command::Author::generate::obrazi> contains three embedded templates
-C<obrazi.html>, C<obrazi.css> and C<obrazi.js>. 
+L<Mojolicious::Command::Author::generate::obrazi> contains four embedded
+templates:
+
+    obrazi.html  — template for a single page gallery, containing all images
+    obrazec.html — template for single image html pages
+    obrazi.css   — template for CSS rules used in both html templates
+    obrazi.js    — JavaScript (jQuery) code for handling navigation and effecs 
+                   in obrazi.html
+
 TODO: Maybe make the templates inflatable.
 
 =head1 DEMOS
@@ -773,7 +806,7 @@ section .image .meta {
     top: 0;
     padding-top: calc(100vh / 2 - 6rem / 2);
     font-size: 6rem;
-    width: 10vw;
+    width: 5vw;
     height: 100%;
     border-radius: 10px;
     cursor:pointer;
@@ -802,13 +835,27 @@ h2.button, h3.button, h4.button {
 .sharer {
     display: inline-block;
     background-color: #3b5998;
-    border-radius: 50%;
     color: white;
     font-weight: bolder;
+    font-family: Repo, sans-serif;
+    border-radius: 10px;
+}
+
+.closer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    font-size: 6rem;
+    color: white;
+    background: transparent;
 }
 
 @@ obrazi.html
-% use Mojo::File qw(path);
+<%
+use Mojo::File qw(path);
+my $p_url  = $self->publish_url;
+my $url    = Mojo::URL->new($p_url);
+%>
 <!DOCTYPE html>
 <html>
     <head>
@@ -838,23 +885,35 @@ h2.button, h3.button, h4.button {
 <%= $app->t('p', $cat->[3]) if $cat->[3] %>
 %    while(my @row = splice @$images, 0, $cols) {
     <div class="row">
-    %   for my $img(@row) { $img_idx++;
+    <%   for my $img(@row) {
+        $img_idx++;
+my $prev = path($linked->{$img->[1]}{prev}[1])->dirname->child($linked->{$img->[1]}{prev}[-2]);
+my $next
+  = $linked->{$img->[1]}{next}
+  ? path($linked->{$img->[1]}{next}[1])->dirname->child($linked->{$img->[1]}{next}[-2])
+  : '';
+    %>
         <div class="col card"
             data-index="<%= $img_idx %>"
             title="<%= $img->[2] %>"
             style="background-image :url('<%= path($img->[1])->dirname->child($img->[-1])%>')">
             <div class="image" id="<%= $img_idx %>" data-category_id="#cat<%= $idx %>"
                 style="background-image: url('<%= path($img->[1])->dirname->child($img->[-2]) %>')">
-                    <div data-index="<%= $img_idx %>" class="prev pull-left text-left text-light">⏴</div>
-                    <div data-index="<%= $img_idx %>" class="next pull-right text-right text-light">⏵</div>
+                    <div data-index="<%= $img_idx %>" class="prev pull-left text-left text-light">
+                        <a class="text-light" href="<%= $prev %>.html">⏴</a>
+                    </div>
+                    <div data-index="<%= $img_idx %>" class="next pull-right text-right text-light">
+                        <a class="text-light" href="<%= $next %>.html">⏵</a>
+                    </div>
 		        <h3 class="category text-right text-light"><%= $cat->[2] %></h3>
                 <div class="meta">
                     <h4><%= $img->[2] %></h4>
                     <a class="button sharer pull-right"
-                        target="_blank" href="https://www.facebook.com/sharer/sharer.php"
-                        title="Споделяне">f</a>
+                        target="_blank" href="https://www.facebook.com/share.php"
+                        title="Споделяне">f Споделяне</a>
                     <p><%= $img->[3] %></p>
                 </div>
+                <a class="button closer" href="<%= $p_url.'#cat' . $idx %>">🗴</a>                
             </div>
         </div>
     % }
@@ -899,7 +958,7 @@ $('section .card').click(function(e){
 });
 
 /*
-    Clicking anywhere on the full-sized image box toggles the visibility of the
+    Clicking anywhere on the full-sized image box (or on the X link, or on the Category title) toggles the visibility of the
     box. Effectively hiding it.
 */
 $('section .card .image').click(function(e) {
@@ -907,6 +966,11 @@ $('section .card .image').click(function(e) {
     $(e.target).toggle('slow');
 });
 
+$('.image > a.closer').click(function(e) {
+    e.stopPropagation();
+    $(e.target).parent().toggle('slow');
+    return true;
+});
 /*
     To be bound to the keydown event, the sections need to have the attribute
     tabindex, set to a meaningful sequence.
@@ -996,8 +1060,8 @@ $('.sharer').click(function(e) {
 @@ obrazec.html
 <%
 use Mojo::File 'path';
-my $css_path = join '', map( {'../'} @{path($img->[1])->dirname->to_array}),'obrazi.css';
-my $js_path  = join '', map( {'../'} @{path($img->[1])->dirname->to_array}),'obrazi.js';
+my $css_path = join '', map({'../'} @{path($img->[1])->dirname->to_array}), 'obrazi.css';
+my $js_path  = join '', map({'../'} @{path($img->[1])->dirname->to_array}), 'obrazi.js';
 my $prev     = path($linked->{$img->[1]}{prev}[1])->dirname->child($linked->{$img->[1]}{prev}[-2])
   ->to_rel(path($img->[1])->dirname);
 my $next
@@ -1005,6 +1069,10 @@ my $next
   ? path($linked->{$img->[1]}{next}[1])->dirname->child($linked->{$img->[1]}{next}[-2])
   ->to_rel(path($img->[1])->dirname)
   : '';
+my $cat_id = 0;
+my $cat    = $categories->first(sub { ++$cat_id && $_->[0] eq $img->[0] });
+my $p_url  = $self->publish_url;
+my $url    = Mojo::URL->new($p_url);
 %>
 <!DOCTYPE html>
 <html>
@@ -1012,19 +1080,21 @@ my $next
         <meta charset="utf-8">
         <meta http-equiv="X-UA-Compatible" content="IE=edge">
         <meta name="<%= $generator %>">
-        <title><%= $img->[2] %>|<%= $cat->[2] %></title>
-        <script src="http://dev.xn--b1arjbl.xn--90ae:3000/mojo/jquery/jquery.js"></script>
-        <link rel="stylesheet" href="http://dev.xn--b1arjbl.xn--90ae:3000/css/malka/chota_all_min.css">
+        <title><%= $img->[2] %><%= $cat->[2]? '|' . $cat->[2] : '' %></title>
+        <script src="<%= $url->path('/mojo/jquery/jquery.js') %>"></script>
+        <link rel="stylesheet" href="<%= $url->path('/css/malka/chota_all_min.css') %>">
         <link rel="stylesheet" href="<%== $css_path %>">
+        <meta property="og:type" content="website" />
+        <% if($url->host) {%><meta property="og:site_name" content="<%= $url->host %>" /><% } %>
+        <meta property="og:type" content="image">
+        <meta property="og:image" content="<%= $url->path(path($img->[1])->dirname->child($img->[-2])) %>" >
+        <meta property="og:image:title" content="<%= $img->[2] %>" >
+        <meta property="og:image:description" content="<%= $img->[3] %>" >
+        <meta property="og:image:width" content="<%= ($img->[-2] =~/(\d+)x/ && $1) %>">        
+        <meta property="og:image:height" content="<%= ($img->[-2] =~/x(\d+)/ && $1) %>">
         <meta name="author" content="<%= $img->[-3] %>">
         <meta name="description" content="<%= $img->[3] %>">
         <meta name="author" content="<%= $img->[-3] %>">
-        <meta property="og:type" content="image">
-        <meta property="og:image:title" content="<%= $img->[2] %>" >
-        <meta property="og:image:description" content="<%= $img->[3] %>" >
-        <meta property="og:image" content="<%= $img->[-2] %>" >
-        <meta property="og:image:width" content="<%= ($img->[-2] =~/(\d+)x/ && $1) %>">        
-        <meta property="og:image:height" content="<%= ($img->[-2] =~/x(\d+)/ && $1) %>">
 
     </head>
     <body>
@@ -1035,14 +1105,17 @@ my $next
                     <% if($next) { %>
                     <a href="<%= $next %>.html"><div class="next pull-right text-right text-light">⏵</div></a>
                     <% } %>
-		        <h3 class="category text-right text-light"><%= $cat->[2] %></h3>
+		        <h3 class="category text-right">
+                    <a class="text-light" href="<%= $p_url . '#cat' . $cat_id %>"><%= $cat->[2] %></a>
+                </h3>
                 <div class="meta">
                     <h4><%= $img->[2] %></h4>
                     <a class="button sharer pull-right"
-                        target="_blank" href="https://www.facebook.com/sharer/sharer.php"
-                        title="Споделяне">f</a>
+                        target="_blank" href="https://www.facebook.com/share.php"
+                        title="Споделяне">f Споделяне</a>
                     <p><%= $img->[3] %></p>
                 </div>
+                <a class="button closer" href="<%= $p_url.'#cat' . $cat_id %>">🗴</a>
             </div>
         </section>
        <script>
